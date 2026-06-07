@@ -37,7 +37,7 @@ COPY ./app ./app
 # to an unstyled layout.
 COPY ./data/template/adsforsocial_analyse.xlsx ./data/template/adsforsocial_analyse.xlsx
 
-RUN uv sync --frozen
+RUN uv sync
 
 RUN useradd --create-home --shell /bin/bash appuser
 USER appuser
