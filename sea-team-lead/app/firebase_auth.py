@@ -29,17 +29,19 @@ def _init():
         import firebase_admin
         from firebase_admin import credentials
 
-        # On Railway / non-GCP hosts there are no Application Default Credentials.
-        # firebase-admin can verify ID tokens with just the project ID (it fetches
-        # Google's public keys to check the JWT signature). No service account needed.
-        if not firebase_admin._apps:
-            try:
-                cred = credentials.ApplicationDefault()
-            except Exception:
-                cred = None
-            _firebase_app = firebase_admin.initialize_app(
-                cred, {"projectId": project_id}
+        # firebase-admin needs Application Default Credentials to verify tokens.
+        # On Railway / non-GCP hosts these don't exist — skip init entirely so
+        # the app runs in open mode instead of crashing.
+        try:
+            cred = credentials.ApplicationDefault()
+        except Exception:
+            _auth_logger.warning(
+                "No Application Default Credentials found — Firebase Auth disabled (open mode)"
             )
+            return
+
+        if not firebase_admin._apps:
+            _firebase_app = firebase_admin.initialize_app(cred, {"projectId": project_id})
         else:
             _firebase_app = firebase_admin.get_app()
         _enabled = True
