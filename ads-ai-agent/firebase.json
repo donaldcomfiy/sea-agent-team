@@ -1,0 +1,26 @@
+{
+  "hosting": {
+    "site": "ads-ai-agent-florian",
+    "public": "dist",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  },
+  "auth": {
+    "providers": {
+      "emailPassword": true,
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "Ads AI Agent",
+        "supportEmail": "albert.florian@icloud.com"
+      }
+    }
+  }
+}

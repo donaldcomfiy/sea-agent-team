@@ -1,0 +1,2327 @@
+# ruff: noqa
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import datetime
+from zoneinfo import ZoneInfo
+import json
+import re
+
+from google.adk.agents import Agent
+from google.adk.apps import App
+from google.adk.models import Gemini
+from google.genai import types
+
+import os
+from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
+from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
+from mcp import StdioServerParameters
+
+from app.google_search import google_autocomplete
+from app.skills import cached_skill
+
+# Helper to load .env files safely
+def load_dotenv():
+    paths_to_check = [
+        os.path.join(os.getcwd(), ".env"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env"),
+    ]
+    for path in paths_to_check:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        key, val = line.split("=", 1)
+                        key = key.strip()
+                        val = val.strip().strip("'\"")
+                        if key and key not in os.environ:
+                            os.environ[key] = val
+
+load_dotenv()
+
+# Map VITE_GEMINI_API_KEY to GEMINI_API_KEY for convenience
+if "VITE_GEMINI_API_KEY" in os.environ and not os.environ.get("GEMINI_API_KEY"):
+    os.environ["GEMINI_API_KEY"] = os.environ["VITE_GEMINI_API_KEY"]
+
+has_api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
+if has_api_key:
+    # Use Gemini Developer API (Google AI Studio)
+    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "False"
+else:
+    # Fall back to Vertex AI (Google Cloud)
+    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
+    os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
+    try:
+        import google.auth
+        _, project_id = google.auth.default()
+        if project_id:
+            os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
+    except Exception:
+        pass
+
+
+# Initialize MongoDB MCP Toolset if connection string is configured
+mongodb_uri = os.environ.get("MDB_MCP_CONNECTION_STRING")
+mongodb_toolset = None
+if mongodb_uri:
+    mongodb_toolset = McpToolset(
+        connection_params=StdioConnectionParams(
+            server_params=StdioServerParameters(
+                command="npx",
+                args=["-y", "@mongodb-js/mongodb-mcp-server"],
+                # Pass the full parent env (PATH, HOME, ...) plus the connection
+                # string. Replacing env with only the URI strips PATH/HOME.
+                env={**os.environ, "MDB_MCP_CONNECTION_STRING": mongodb_uri},
+            ),
+            # npx may cold-start (download) the server; the 5s default is too short.
+            timeout=30,
+        ),
+        # The MongoDB MCP server exposes ~20 tools (many Atlas admin tools with
+        # large schemas) which overwhelmed the flash model and stalled the run.
+        # Restrict to the data tools the landing_page_agent actually needs.
+        tool_filter=["connect", "find", "insert-many", "update-many", "list-collections", "list-databases"],
+    )
+
+
+GLOBAL_RULES = [
+    "Verwende niemals Emojis in deinen Antworten, Headlines, Descriptions, Übersetzungen oder sonstigen Ausgaben. Emojis sind strikt verboten.",
+    "Verwende keinerlei einleitende Floskeln, Metatexte oder Übergangssätze wie 'Hier ist die strukturierte Analyse...' oder 'Im Folgenden finden Sie...'. Gib die Ergebnisse immer direkt und ohne einleitende Erklärung aus. AUSNAHME: ```json-Codebloecke, die eine Agent-spezifische Pflicht-Ausgabe sind (siehe individuelle Instruction), sind ausdruecklich erlaubt und in dem Fall vorgeschrieben.",
+    "Gib niemals Verbindungs-Strings, Datenbank-URIs, Passwoerter oder andere Credentials in deinen Antworten aus, auch nicht teilweise. Solche Werte sind strikt vertraulich.",
+    "In deutschen Ausgaben verwende IMMER die echten Umlaute ä, ö, ü und ß. Schreibe NIEMALS die ASCII-Ersatzformen ae, oe, ue oder ss in user-sichtbarem Text (Prosa, Headlines, Descriptions, Werte in ```json-Bloecken). Beispiele: 'Tonalität' statt 'Tonalitaet', 'Bedürfnis' statt 'Beduerfnis', 'Größe' statt 'Groesse', 'Maß' statt 'Mass'. Diese Regel gilt fuer ALLE Ausgaben — auch fuer die Werte innerhalb von ```json-Bloecken.",
+]
+
+
+def apply_rules(instruction: str) -> str:
+    rules_text = "\n\nGlobale Verhaltensregeln, die UNBEDINGT einzuhalten sind:\n" + "\n".join(f"- {rule}" for rule in GLOBAL_RULES)
+    return instruction.strip() + rules_text
+
+
+def mongodb_persist_directive(agent_field: str) -> str:
+    """Shared MCP-write directive appended to every step-agent's instruction
+    when MongoDB MCP is configured. Each agent extends the same per-URL
+    document under `customer_profiles` with its own slice (`strategy`,
+    `keywords`, `ads`...). Together they build up a full customer memory that
+    the next session can resume from.
+
+    The directive is best-effort: if the analysis block (and therefore the URL)
+    is missing, or if any MCP call fails, the agent continues to its prose +
+    JSON answer regardless — persistence must never block the user-visible
+    output.
+    """
+    return f"""
+
+## Persistenz nach MongoDB (Pflicht wenn verbunden)
+Bevor du deine endgueltige Antwort sendest, persistiere dein Ergebnis im Customer-Memory:
+1. Rufe `connect` mit dem Verbindungs-String "{mongodb_uri}" auf (nur falls noch nicht verbunden).
+2. Rufe `update-many` auf der Database `sea_team_lead`, Collection `customer_profiles` auf:
+   - Filter: {{"url": "<landing_page_url aus dem landing_page_analysis-Block des LP-Agenten>"}}
+   - Update: {{"$set": {{"{agent_field}": <dein vollstaendiges JSON-Objekt vom Typ "{agent_field}">, "last_built_at": "<aktueller ISO-Timestamp wie 2026-05-29T21:30:00Z>"}}}}
+3. Fahre dann mit deiner Antwort fort (Prosa + JSON-Block am Ende).
+
+Wichtige Spezialregeln:
+- Wenn keine `landing_page_url` im Kontext verfuegbar ist (z. B. weil der Nutzer dich direkt ohne vorherige LP-Analyse aufgerufen hat), ueberspringe die Persistenz stillschweigend - kein connect, kein update.
+- Wenn `connect` oder `update-many` einen Fehler zurueckgibt, fahre dennoch mit der Antwort fort - die Persistenz ist best-effort, der Nutzer sieht immer das Ergebnis.
+- Persistiere NICHT in Antworten, die nur eine Rueckfrage an den Nutzer sind (z. B. Account-Picker, Confirm). Persistiere nur dein finales Ergebnis.
+"""
+
+
+def json_block_directive(example: str) -> str:
+    """Directive appended to specialist agents so the frontend can render rich
+    cards: emit a machine-readable JSON block in addition to the prose answer."""
+    return (
+        "\n\nGib am Ende deiner Antwort zusaetzlich einen maschinenlesbaren JSON-Block "
+        "in einem mit ```json markierten Codeblock aus (keine weiteren Zeichen danach), "
+        "exakt in dieser Struktur (Werte auf Deutsch, an den Kunden angepasst):\n"
+        f"```json\n{example}\n```"
+    )
+
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "customers")
+
+
+def normalize_lp_url(url: str) -> str:
+    """Normalise a landing-page URL into a stable cache key.
+
+    The host is lowercased and `www.` is stripped, but the PATH is preserved
+    (and trailing slashes are removed) so that "esn.com" and
+    "esn.com/products/vitamin-d3-k2" map to DIFFERENT cache entries — they are
+    different pages with different content and need separate analyses.
+    """
+    s = (url or "").strip()
+    s = re.sub(r"^https?://", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"^www\.", "", s, flags=re.IGNORECASE)
+    if "/" in s:
+        host, _, rest = s.partition("/")
+        s = host.lower() + "/" + rest
+    else:
+        s = s.lower()
+    return s.rstrip("/")
+
+
+def _get_profile_filepath(domain: str) -> str:
+    # Build a safe filename from the normalised URL (host + path). Different
+    # paths under the same host get different files so a brand page and a
+    # specific product page never share a cache entry.
+    clean = normalize_lp_url(domain)
+    clean = re.sub(r'[^a-zA-Z0-9_.-]', '_', clean)
+    return os.path.join(DATA_DIR, f"{clean}.json")
+
+
+def save_customer_profile(domain: str, profile_data: str) -> str:
+    """Speichert Prosa-Zusammenfassung UND strukturiertes landing_page_analysis-
+    Objekt fuer eine Domain (lokaler Cache, kein MongoDB).
+
+    Args:
+        domain: Die Domain oder URL des Kunden (z. B. adsforsocial.de).
+        profile_data: Entweder
+            - eine reine Prosa-Zusammenfassung (Altformat, dann ohne `analysis`)
+            - oder ein JSON-String mit `{"profile_prose": "...", "analysis": {...}}`
+              (Neuformat). Wenn der String mit `{` startet und gueltiges JSON ist,
+              wird er als Neuformat behandelt und beide Felder werden gespeichert.
+    """
+    os.makedirs(DATA_DIR, exist_ok=True)
+    filepath = _get_profile_filepath(domain)
+
+    doc: dict[str, Any] = {"domain": domain}
+    stripped = (profile_data or "").lstrip()
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(profile_data)
+            if isinstance(parsed, dict):
+                if "profile_prose" in parsed:
+                    doc["profile_prose"] = parsed.get("profile_prose", "")
+                if "analysis" in parsed:
+                    doc["analysis"] = parsed.get("analysis")
+        except json.JSONDecodeError:
+            pass
+    if "profile_prose" not in doc and "analysis" not in doc:
+        # Legacy fallback: plain prose blob.
+        doc["profile_prose"] = profile_data
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2)
+    return f"Kundenprofil erfolgreich gespeichert unter {filepath}."
+
+
+def load_customer_profile(domain: str) -> str:
+    """Laedt das gespeicherte Kundenprofil fuer eine Domain.
+
+    Gibt einen JSON-String zurueck, damit der Agent reproduzierbar beide Felder
+    bekommt: `{"profile_prose": "...", "analysis": {...} | null}`. Bei
+    Altprofilen, die nur das Feld `profile` (oder gar nichts) haben, ist
+    `analysis` null und `profile_prose` der bisherige Text.
+
+    Args:
+        domain: Die Domain oder URL des Kunden.
+
+    Returns:
+        JSON-String oder Meldung, dass kein Profil existiert.
+    """
+    filepath = _get_profile_filepath(domain)
+    if not os.path.exists(filepath):
+        return "Kein gespeichertes Profil gefunden."
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return "Kein gespeichertes Profil gefunden."
+    prose = data.get("profile_prose") or data.get("profile") or ""
+    analysis = data.get("analysis")
+    return json.dumps({"profile_prose": prose, "analysis": analysis}, ensure_ascii=False)
+
+
+def save_campaign_as_excel(filename: str, campaign_data_json: str) -> str:
+    """Speichert Kampagnendaten als formatierte Excel-Datei (.xlsx) mit Template-Styling.
+
+    Args:
+        filename: Name der Excel-Datei (z.B. kampagne_adsforsocial.xlsx)
+        campaign_data_json: JSON-String mit semantischen Kampagnendaten. Erwartete Struktur:
+            {
+              "domain": "adsforsocial.de",
+              "datum": "Mai 2025",
+              "kampagnen": [
+                {"name": "Brand Search", "typ": "Suchnetzwerk", "budget": "15 Euro/Tag",
+                 "gebotsstrategie": "Klicks maximieren", "begruendung": "..."}
+              ],
+              "keywords": [
+                {"kampagne": "Brand Search", "anzeigengruppe": "Brand",
+                 "keyword": "[adsforsocial]", "match_type": "Exact",
+                 "suchintention": "Navigational / Brand", "kategorie": "Brand",
+                 "prioritaet": "Hoch"}
+              ],
+              "anzeigentexte": [
+                {"kampagne": "Brand Search", "anzeigengruppe": "Brand",
+                 "headlines": ["Headline 1", "Headline 2"],
+                 "descriptions": ["Description 1", "Description 2"]}
+              ]
+            }
+    """
+    import json
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    export_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "exports")
+    os.makedirs(export_dir, exist_ok=True)
+
+    if not filename.endswith(".xlsx"):
+        filename = re.sub(r"\.[^.]+$", "", filename) + ".xlsx"
+    filepath = os.path.join(export_dir, filename)
+
+    try:
+        data = json.loads(campaign_data_json)
+    except Exception as e:
+        return f"Fehler beim Parsen der JSON-Daten: {str(e)}"
+
+    # ---- Farbpalette (aus Template extrahiert) ----
+    C_NAVY       = "1F3864"
+    C_MEDBLUE    = "2E75B6"
+    C_GREEN_DARK = "375623"
+    C_GREEN_PMAX = "70AD47"
+    C_ORANGE     = "C55A11"
+    C_TEAL       = "1F6B75"
+    C_YELLOW_DK  = "7F6000"
+    C_WHITE      = "FFFFFF"
+    C_DARK       = "404040"
+    F_GRAY       = "F2F2F2"
+    F_LIGHTBLUE  = "DEEAF1"
+    F_LIGHTGREEN = "E2EFDA"
+    F_LIGHTORANG = "FCE4D6"
+    F_LIGHTTEAL  = "D9EEF0"
+    F_LIGHTYELL  = "FFF2CC"
+    F_HOCH_BG    = "C6EFCE"
+    T_HOCH       = "276221"
+    F_MITTEL_BG  = "FFEB9C"
+    T_MITTEL     = "9C5700"
+    F_EXACT      = "D9E1F2"
+    F_PHRASE     = "F4F4F4"
+
+    # ---- Stil-Hilfsfunktionen ----
+    def mk_fill(hex_color):
+        return PatternFill(start_color=hex_color, end_color=hex_color, fill_type="solid")
+
+    def mk_font(size=10, bold=False, color=C_DARK):
+        return Font(name="Arial", size=size, bold=bold, color=color)
+
+    thin_side = Side(style="thin", color="D3D3D3")
+    thin_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+
+    def mk_align(h="left", v="center", wrap=True):
+        return Alignment(horizontal=h, vertical=v, wrap_text=wrap)
+
+    def set_col_headers(ws, row, headers, fill=C_NAVY):
+        for ci, h in enumerate(headers, 1):
+            cell = ws.cell(row=row, column=ci, value=h)
+            cell.font = mk_font(10, True, C_WHITE)
+            cell.fill = mk_fill(fill)
+            cell.alignment = mk_align("center", "center", True)
+            cell.border = thin_border
+        ws.row_dimensions[row].height = 20
+
+    def set_data_row(ws, row, values, fills, fonts=None, aligns=None):
+        for ci, val in enumerate(values, 1):
+            cell = ws.cell(row=row, column=ci, value=val)
+            if fills and ci <= len(fills) and fills[ci - 1]:
+                cell.fill = mk_fill(fills[ci - 1])
+            cell.font = (fonts[ci - 1] if fonts and ci <= len(fonts) and fonts[ci - 1] else mk_font())
+            cell.alignment = (aligns[ci - 1] if aligns and ci <= len(aligns) and aligns[ci - 1] else mk_align())
+            cell.border = thin_border
+        ws.row_dimensions[row].height = 18
+
+    # ---- Template-Header-Kopierfunktion ----
+    def copy_template_header(tmpl_ws, dst_ws, num_header_rows, replace_map=None):
+        import copy as _copy
+        for col_letter, dim in tmpl_ws.column_dimensions.items():
+            if dim.width:
+                dst_ws.column_dimensions[col_letter].width = dim.width
+        for merge in tmpl_ws.merged_cells.ranges:
+            if merge.min_row <= num_header_rows:
+                try:
+                    dst_ws.merge_cells(start_row=merge.min_row, start_column=merge.min_col,
+                                       end_row=min(merge.max_row, num_header_rows), end_column=merge.max_col)
+                except Exception: pass
+        for r in range(1, num_header_rows + 1):
+            dst_ws.row_dimensions[r].height = tmpl_ws.row_dimensions[r].height or 15
+            for c in range(1, tmpl_ws.max_column + 1):
+                src = tmpl_ws.cell(row=r, column=c)
+                dst = dst_ws.cell(row=r, column=c)
+                # MergedCell ist nur ein Proxy ohne eigene Werte – ueberspringen
+                if src.__class__.__name__ == "MergedCell":
+                    continue
+                val = src.value
+                if val is not None and replace_map:
+                    for old, new in replace_map.items():
+                        if old in str(val): val = str(val).replace(old, new)
+                dst.value = val
+                if src.has_style:
+                    dst.font = _copy.copy(src.font)
+                    dst.fill = _copy.copy(src.fill)
+                    dst.border = _copy.copy(src.border)
+                    dst.alignment = _copy.copy(src.alignment)
+        return num_header_rows + 1
+
+    def fallback_banner(ws, row, text, font_size, bold, fill, merged_to, height):
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=merged_to)
+        c = ws.cell(row=row, column=1, value=text)
+        c.font = mk_font(font_size, bold, C_WHITE)
+        c.fill = mk_fill(fill)
+        c.alignment = mk_align("center", "center", False)
+        ws.row_dimensions[row].height = height
+
+    _tmpl_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "template", "adsforsocial_analyse.xlsx")
+    _tmpl_wb = None
+    try:
+        _tmpl_wb = openpyxl.load_workbook(_tmpl_path)
+    except Exception: pass
+
+    domain = data.get("domain", "")
+    datum = data.get("datum", datetime.datetime.now(ZoneInfo("Europe/Berlin")).strftime("%B %Y"))
+    landingpage_analyse = data.get("landingpage_analyse", {})
+    kampagnen = data.get("kampagnen", [])
+    keywords = data.get("keywords", [])
+    anzeigentexte = data.get("anzeigentexte", [])
+    is_old_format = not (kampagnen or keywords or anzeigentexte or landingpage_analyse) and any(
+        isinstance(v, list) for v in data.values()
+    )
+
+    wb = openpyxl.Workbook()
+    if wb.sheetnames:
+        wb.remove(wb.active)
+
+    if is_old_format:
+        # Rueckwaertskompatibilitaet: altes Zeilenformat
+        for sheet_name, rows in data.items():
+            clean_name = re.sub(r"[\\*?:/\[\]]", "", sheet_name)[:31] or "Tabelle"
+            ws = wb.create_sheet(title=clean_name)
+            ws.views.sheetView[0].showGridLines = False
+            if not rows:
+                continue
+            for r_idx, row_data in enumerate(rows, start=1):
+                ws.append(row_data)
+                is_hdr = (r_idx == 1)
+                for ci, val in enumerate(row_data, 1):
+                    cell = ws.cell(row=r_idx, column=ci)
+                    if is_hdr:
+                        cell.font = mk_font(10, True, C_WHITE)
+                        cell.fill = mk_fill(C_NAVY)
+                        cell.alignment = mk_align("center", "center", True)
+                    else:
+                        cell.font = mk_font()
+                        cell.alignment = mk_align()
+                    cell.border = thin_border
+            for col in ws.columns:
+                ml = max((len(str(c.value or "")) for c in col), default=0)
+                ws.column_dimensions[get_column_letter(col[0].column)].width = max(min(ml + 4, 60), 12)
+
+    else:
+        # =================== Sheet 0: Landingpage-Analyse ===================
+        if landingpage_analyse:
+            ws = wb.create_sheet(title="Landingpage-Analyse")
+            ws.views.sheetView[0].showGridLines = False
+
+            _tmpl_lp = _tmpl_wb["Landingpage-Analyse"] if _tmpl_wb and "Landingpage-Analyse" in _tmpl_wb.sheetnames else None
+            if _tmpl_lp:
+                replace_map = {
+                    "adsforsocial.de": domain if domain else "adsforsocial.de",
+                    "Mai 2025": datum,
+                }
+                copy_template_header(_tmpl_lp, ws, _tmpl_lp.max_row, replace_map)
+
+                # USPs befuellen (Zeilen 6-11)
+                usps = landingpage_analyse.get("usps", [])
+                for idx in range(6):
+                    row = 6 + idx
+                    if idx < len(usps):
+                        usp = usps[idx]
+                        ws.cell(row=row, column=1, value=str(idx + 1))
+                        ws.cell(row=row, column=2, value=usp.get("bezeichnung", ""))
+                        ws.cell(row=row, column=3, value=usp.get("beschreibung", ""))
+                    else:
+                        ws.cell(row=row, column=1, value="")
+                        ws.cell(row=row, column=2, value="")
+                        ws.cell(row=row, column=3, value="")
+
+                # Zielgruppen befuellen (Zeilen 16-19)
+                zielgruppen = landingpage_analyse.get("zielgruppen", [])
+                for idx in range(4):
+                    row = 16 + idx
+                    if idx < len(zielgruppen):
+                        zg = zielgruppen[idx]
+                        ws.cell(row=row, column=1, value=str(idx + 1))
+                        ws.cell(row=row, column=2, value=zg.get("name", ""))
+                        ws.cell(row=row, column=3, value=zg.get("beschreibung", ""))
+                    else:
+                        ws.cell(row=row, column=1, value="")
+                        ws.cell(row=row, column=2, value="")
+                        ws.cell(row=row, column=3, value="")
+
+                # Produkte befuellen (Zeilen 24-28)
+                produkte = landingpage_analyse.get("produkte", [])
+                for idx in range(5):
+                    row = 24 + idx
+                    if idx < len(produkte):
+                        prod = produkte[idx]
+                        ws.cell(row=row, column=1, value=prod.get("name", ""))
+                        ws.cell(row=row, column=2, value=prod.get("inhalte", ""))
+                        ws.cell(row=row, column=3, value=prod.get("formate", ""))
+                        ws.cell(row=row, column=4, value=prod.get("besonderheiten", ""))
+                    else:
+                        ws.cell(row=row, column=1, value="")
+                        ws.cell(row=row, column=2, value="")
+                        ws.cell(row=row, column=3, value="")
+                        ws.cell(row=row, column=4, value="")
+
+                # Tonalitaet befuellen (Zeilen 33-35)
+                tonalitaet = landingpage_analyse.get("tonalitaet", [])
+                for idx in range(3):
+                    row = 33 + idx
+                    if idx < len(tonalitaet):
+                        ton = tonalitaet[idx]
+                        ws.cell(row=row, column=1, value=ton.get("merkmal", ""))
+                        ws.cell(row=row, column=2, value=ton.get("auspraegung", ""))
+                    else:
+                        ws.cell(row=row, column=1, value="")
+                        ws.cell(row=row, column=2, value="")
+
+                # Keywords befuellen (Zeilen 39-43)
+                lp_keywords = landingpage_analyse.get("keywords", [])
+                kw_slots = [
+                    (39, 1), (40, 1), (41, 1), (42, 1), (43, 1),
+                    (39, 3), (40, 3), (41, 3), (42, 3),
+                    (39, 5), (40, 5), (41, 5), (42, 5)
+                ]
+                for idx, (r, c) in enumerate(kw_slots):
+                    if idx < len(lp_keywords):
+                        ws.cell(row=r, column=c, value=lp_keywords[idx])
+                    else:
+                        ws.cell(row=r, column=c, value="")
+            else:
+                fallback_banner(ws, 1, f"Landingpage-Analyse – {domain}", 15, True, C_NAVY, 6, 24)
+                ws.cell(row=3, column=1, value="Template-Blatt 'Landingpage-Analyse' nicht gefunden.")
+
+        # =================== Sheet 1: Kampagnenstruktur ===================
+        if kampagnen:
+            NC = 5
+            ws = wb.create_sheet(title="Kampagnenstruktur")
+            ws.views.sheetView[0].showGridLines = False
+
+            # Template-Blatt "Kampagnenstruktur" hat Zeilen 1-5 als Header
+            # (1=Haupt-Banner, 2=Sub-Banner, 3=Leerzeile, 4=Sektions-Header, 5=Spalten-Header)
+            _tmpl_kamp = _tmpl_wb["Kampagnenstruktur"] if _tmpl_wb and "Kampagnenstruktur" in _tmpl_wb.sheetnames else None
+            if _tmpl_kamp:
+                replace_map = {
+                    "adsforsocial.de": domain if domain else "adsforsocial.de",
+                    "Mai 2025": datum,
+                }
+                data_start_row = copy_template_header(_tmpl_kamp, ws, 5, replace_map)
+                # Spalten-Header in Zeile 5 mit unseren Spalten ueberschreiben
+                set_col_headers(ws, 5, ["Kampagne", "Kampagnentyp", "Budget", "Gebotsstrategie", "Begruendung"])
+            else:
+                # Fallback wenn Template fehlt
+                for ci, w in enumerate([28, 22, 18, 28, 50], 1):
+                    ws.column_dimensions[get_column_letter(ci)].width = w
+                fallback_banner(ws, 1, f"Kampagnenstruktur-Empfehlung – {domain}", 15, True, C_NAVY, NC, 24)
+                fallback_banner(ws, 2, f"Agent: strategy_agent  |  Plattform: Google Ads  |  Stand: {datum}", 9, False, C_MEDBLUE, NC, 16)
+                ws.row_dimensions[3].height = 8
+                set_col_headers(ws, 5, ["Kampagne", "Kampagnentyp", "Budget", "Gebotsstrategie", "Begruendung"])
+                data_start_row = 6
+
+            KAMP_FILLS = {
+                "pmax": F_LIGHTGREEN, "performance max": F_LIGHTGREEN,
+                "remarketing": F_LIGHTORANG, "retargeting": F_LIGHTORANG,
+            }
+            for ki, kamp in enumerate(kampagnen):
+                row = data_start_row + ki
+                name = kamp.get("name", "")
+                fill = F_GRAY if ki % 2 == 0 else F_LIGHTBLUE
+                for key, kf in KAMP_FILLS.items():
+                    if key in name.lower():
+                        fill = kf
+                        break
+                set_data_row(
+                    ws, row,
+                    [name, kamp.get("typ", ""), kamp.get("budget", ""),
+                     kamp.get("gebotsstrategie", ""), kamp.get("begruendung", "")],
+                    [fill] * NC,
+                    fonts=[mk_font()] * NC,
+                    aligns=[mk_align("left", "center", True)] * NC,
+                )
+
+        # =================== Sheet 2: Keyword-Recherche ===================
+        if keywords:
+            NC = 6
+            ws = wb.create_sheet(title="Keyword-Recherche")
+            ws.views.sheetView[0].showGridLines = False
+
+            # Template-Blatt "Keyword-Recherche" hat Zeilen 1-4 als Header
+            # (1=Haupt-Banner, 2=Sub-Banner, 3=Leerzeile, 4=Spalten-Header)
+            _tmpl_kw = _tmpl_wb["Keyword-Recherche"] if _tmpl_wb and "Keyword-Recherche" in _tmpl_wb.sheetnames else None
+            if _tmpl_kw:
+                replace_map = {
+                    "adsforsocial.de": domain if domain else "adsforsocial.de",
+                    "Mai 2025": datum,
+                }
+                data_start_kw = copy_template_header(_tmpl_kw, ws, 4, replace_map)
+            else:
+                for ci, w in enumerate([28, 38, 12, 28, 22, 12], 1):
+                    ws.column_dimensions[get_column_letter(ci)].width = w
+                fallback_banner(ws, 1, f"Keyword-Recherche – {domain}", 15, True, C_NAVY, NC, 24)
+                fallback_banner(ws, 2, f"Agent: keyword_agent  |  Plattform: Google Ads  |  Stand: {datum}", 9, False, C_MEDBLUE, NC, 16)
+                ws.row_dimensions[3].height = 8
+                set_col_headers(ws, 4, ["Kampagne / Anzeigengruppe", "Keyword", "Match Type", "Suchintention", "Kategorie", "Prioritaet"])
+                data_start_kw = 5
+
+            row = data_start_kw
+            last_kamp_key = None
+            KW_SEC_COLORS = [C_MEDBLUE, C_GREEN_DARK, C_ORANGE, C_TEAL, C_YELLOW_DK, C_NAVY]
+            kamp_color_map = {}
+            color_idx = 0
+
+            for kw_idx, kw in enumerate(keywords):
+                kampagne = kw.get("kampagne", "")
+                ag = kw.get("anzeigengruppe", "")
+                keyword = kw.get("keyword", "")
+                mt = kw.get("match_type", "")
+                sint = kw.get("suchintention", "")
+                kat = kw.get("kategorie", "")
+                prio = kw.get("prioritaet", "")
+                kamp_key = f"{kampagne}|{ag}"
+
+                if kamp_key != last_kamp_key:
+                    if kampagne not in kamp_color_map:
+                        kamp_color_map[kampagne] = KW_SEC_COLORS[color_idx % len(KW_SEC_COLORS)]
+                        color_idx += 1
+                    sec_color = kamp_color_map[kampagne]
+                    sec_text = f"{kampagne} – {ag}" if ag else kampagne
+                    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=NC)
+                    c = ws.cell(row=row, column=1, value=sec_text)
+                    c.font = mk_font(11, True, C_WHITE)
+                    c.fill = mk_fill(sec_color)
+                    c.alignment = mk_align("left", "center", False)
+                    ws.row_dimensions[row].height = 18
+                    row += 1
+                    last_kamp_key = kamp_key
+
+                base = F_GRAY if kw_idx % 2 == 0 else F_LIGHTBLUE
+                mt_lower = mt.lower()
+                if "exact" in mt_lower:
+                    mt_fill, mt_font = F_EXACT, mk_font(10, True)
+                elif "phrase" in mt_lower:
+                    mt_fill, mt_font = F_PHRASE, mk_font(10, True)
+                else:
+                    mt_fill, mt_font = base, mk_font()
+
+                if "hoch" in prio.lower():
+                    pf, ptxt = F_HOCH_BG, mk_font(10, True, T_HOCH)
+                elif "mittel" in prio.lower():
+                    pf, ptxt = F_MITTEL_BG, mk_font(10, True, T_MITTEL)
+                else:
+                    pf, ptxt = base, mk_font()
+
+                set_data_row(
+                    ws, row,
+                    [kampagne, keyword, mt, sint, kat, prio],
+                    [base, base, mt_fill, base, base, pf],
+                    fonts=[mk_font(), mk_font(), mt_font, mk_font(), mk_font(), ptxt],
+                    aligns=[
+                        mk_align(), mk_align(),
+                        mk_align("center", "center", False),
+                        mk_align(), mk_align(),
+                        mk_align("center", "center", False),
+                    ],
+                )
+                row += 1
+
+        # =================== Sheet 3: Anzeigentexte (RSA) ===================
+        if anzeigentexte:
+            NC = 6
+            ws = wb.create_sheet(title="Anzeigentexte (RSA)")
+            ws.views.sheetView[0].showGridLines = False
+
+            # Template-Blatt "Anzeigentexte (RSA)" hat Zeilen 1-2 als Header
+            # (1=Haupt-Banner, 2=Sub-Banner)
+            _tmpl_at = _tmpl_wb["Anzeigentexte (RSA)"] if _tmpl_wb and "Anzeigentexte (RSA)" in _tmpl_wb.sheetnames else None
+            if _tmpl_at:
+                replace_map = {
+                    "adsforsocial.de": domain if domain else "adsforsocial.de",
+                    "Mai 2025": datum,
+                }
+                data_start_at = copy_template_header(_tmpl_at, ws, 2, replace_map)
+            else:
+                for ci, w in enumerate([22, 50, 10, 8, 12, 20], 1):
+                    ws.column_dimensions[get_column_letter(ci)].width = w
+                fallback_banner(ws, 1, f"Anzeigentexte (RSA) – {domain}", 15, True, C_NAVY, NC, 24)
+                fallback_banner(ws, 2, f"Agent: copywriter_agent  |  Plattform: Google Ads  |  Stand: {datum}", 9, False, C_MEDBLUE, NC, 16)
+                data_start_at = 3
+
+            row = data_start_at
+            AG_SEC_COLORS = [C_MEDBLUE, C_GREEN_DARK, C_ORANGE, C_TEAL, C_YELLOW_DK, C_NAVY]
+            AG_ROW_FILLS  = [F_LIGHTBLUE, F_LIGHTGREEN, F_LIGHTORANG, F_LIGHTTEAL, F_LIGHTYELL, F_GRAY]
+            POS_LABELS = [
+                "Pos. 1 – Produkt / Keyword",
+                "Pos. 2 – USP / Nutzen",
+                "Pos. 3 – Call-to-Action",
+            ]
+
+            for ag_idx, ag in enumerate(anzeigentexte):
+                ag_name     = ag.get("anzeigengruppe", f"Anzeigengruppe {ag_idx + 1}")
+                kampagne    = ag.get("kampagne", "")
+                headlines   = ag.get("headlines", [])
+                descriptions = ag.get("descriptions", [])
+                sec_color   = AG_SEC_COLORS[ag_idx % len(AG_SEC_COLORS)]
+                row_fill    = AG_ROW_FILLS[ag_idx % len(AG_ROW_FILLS)]
+
+                # Leerzeile + Abschnitts-Header
+                ws.row_dimensions[row].height = 8
+                row += 1
+                sec_label = f"{kampagne} – {ag_name}" if kampagne else ag_name
+                ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=NC)
+                c = ws.cell(row=row, column=1, value=sec_label)
+                c.font = mk_font(11, True, C_WHITE)
+                c.fill = mk_fill(sec_color)
+                c.alignment = mk_align("left", "center", False)
+                ws.row_dimensions[row].height = 18
+                row += 1
+
+                if headlines:
+                    # Headlines Sub-Header
+                    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=NC)
+                    c = ws.cell(row=row, column=1, value="Headlines (max. 30 Zeichen)")
+                    c.font = mk_font(10, True, C_WHITE)
+                    c.fill = mk_fill(sec_color)
+                    c.alignment = mk_align("left", "center", False)
+                    ws.row_dimensions[row].height = 16
+                    row += 1
+
+                    set_col_headers(ws, row, ["Position", "Headline-Text", "Zeichen", "Limit", "Status", "Notizen"])
+                    row += 1
+
+                    for hl_idx, hl in enumerate(headlines):
+                        pos_label = POS_LABELS[hl_idx // 5] if hl_idx // 5 < len(POS_LABELS) and hl_idx % 5 == 0 else ""
+                        ch = len(hl)
+                        ok = ch <= 30
+                        zf = "E2EFDA" if ok else "FCE4D6"
+                        sf = "E2EFDA" if ok else "FCE4D6"
+                        zt = mk_font(9, True, C_GREEN_DARK if ok else C_ORANGE)
+                        st = mk_font(10, True, C_GREEN_DARK if ok else C_ORANGE)
+                        rf = row_fill if hl_idx % 2 == 0 else F_GRAY
+                        set_data_row(
+                            ws, row,
+                            [pos_label, hl, f"{ch}/30", "30", "OK" if ok else "LIMIT", ""],
+                            [rf, rf, zf, rf, sf, rf],
+                            fonts=[mk_font(10, bool(pos_label)), mk_font(), zt, mk_font(9), st, mk_font()],
+                            aligns=[
+                                mk_align("left", "center", False),
+                                mk_align("left", "center", False),
+                                mk_align("center", "center", False),
+                                mk_align("center", "center", False),
+                                mk_align("center", "center", False),
+                                mk_align(),
+                            ],
+                        )
+                        row += 1
+
+                if descriptions:
+                    ws.row_dimensions[row].height = 8
+                    row += 1
+                    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=NC)
+                    c = ws.cell(row=row, column=1, value="Descriptions (max. 90 Zeichen)")
+                    c.font = mk_font(10, True, C_WHITE)
+                    c.fill = mk_fill(sec_color)
+                    c.alignment = mk_align("left", "center", False)
+                    ws.row_dimensions[row].height = 16
+                    row += 1
+
+                    set_col_headers(ws, row, ["Nr.", "Description-Text", "Zeichen", "Limit", "Status", "Notizen"])
+                    row += 1
+
+                    for di, desc in enumerate(descriptions):
+                        ch = len(desc)
+                        ok = ch <= 90
+                        zf = "E2EFDA" if ok else "FCE4D6"
+                        sf = "E2EFDA" if ok else "FCE4D6"
+                        zt = mk_font(9, True, C_GREEN_DARK if ok else C_ORANGE)
+                        st = mk_font(10, True, C_GREEN_DARK if ok else C_ORANGE)
+                        rf = row_fill if di % 2 == 0 else F_GRAY
+                        set_data_row(
+                            ws, row,
+                            [f"Desc. {di + 1}", desc, f"{ch}/90", "90", "OK" if ok else "LIMIT", ""],
+                            [rf, rf, zf, rf, sf, rf],
+                            fonts=[mk_font(10, True), mk_font(), zt, mk_font(9), st, mk_font()],
+                            aligns=[
+                                mk_align("center", "center", False),
+                                mk_align("left", "center", True),
+                                mk_align("center", "center", False),
+                                mk_align("center", "center", False),
+                                mk_align("center", "center", False),
+                                mk_align(),
+                            ],
+                        )
+                        row += 1
+
+    wb.save(filepath)
+    return f"Kampagnendaten erfolgreich als Excel (.xlsx) exportiert unter {filepath}."
+
+
+def create_excel_exporter_agent():
+    return Agent(
+        name="excel_exporter_agent",
+        model=Gemini(
+            model="gemini-flash-latest",
+            retry_options=types.HttpRetryOptions(attempts=3),
+        ),
+        instruction=apply_rules("""Du bist der Excel-Export-Spezialist. Deine Aufgabe ist es, die vollstaendige Google Ads Kampagnenstruktur sowie die Landingpage-Analyse in ein semantisches JSON-Format umzuwandeln und als professionell gestaltete Excel-Datei zu speichern.
+
+Erstelle ein JSON-Objekt mit folgender Struktur und rufe damit das `save_campaign_as_excel`-Tool auf:
+
+{
+  "domain": "<domain des Kunden, z.B. adsforsocial.de>",
+  "datum": "<aktueller Monat und Jahr, z.B. Mai 2025>",
+  "landingpage_analyse": {
+    "usps": [
+      {
+        "bezeichnung": "<Kurze USP Bezeichnung, z.B. Schnelligkeit>",
+        "beschreibung": "<Beschreibung des USPs>"
+      }
+    ],
+    "zielgruppen": [
+      {
+        "name": "<Zielgruppen-Name, z.B. E-Commerce & Onlineshops>",
+        "beschreibung": "<Beschreibung der Zielgruppe>"
+      }
+    ],
+    "produkte": [
+      {
+        "name": "<Paket / Leistung, z.B. Basic Paket>",
+        "inhalte": "<Inhalt/Menge/Details>",
+        "formate": "<Formate, z.B. FB, IG, Story>",
+        "besonderheiten": "<Besonderheiten/USPs des Produkts>"
+      }
+    ],
+    "tonalitaet": [
+      {
+        "merkmal": "<Merkmal, z.B. Kommunikationsstil, Ansprache, Ausrichtung>",
+        "auspraegung": "<Beschreibung der Auspraegung>"
+      }
+    ],
+    "keywords": [
+      "<Keyword 1>",
+      "<Keyword 2>"
+    ]
+  },
+  "kampagnen": [
+    {
+      "name": "<Kampagnenname, z.B. Brand Search>",
+      "typ": "<Kampagnentyp, z.B. Suchnetzwerk>",
+      "budget": "<Budget, z.B. 15 Euro/Tag>",
+      "gebotsstrategie": "<Gebotsstrategie, z.B. Klicks maximieren>",
+      "begruendung": "<Strategische Begruendung in 1-2 Saetzen>"
+    }
+  ],
+  "keywords": [
+    {
+      "kampagne": "<Kampagnenname>",
+      "anzeigengruppe": "<Anzeigengruppenname>",
+      "keyword": "<Keyword inklusive Match-Type-Klammern, z.B. [adsforsocial] oder 'ads for social'>",
+      "match_type": "<Exact, Phrase oder Broad>",
+      "suchintention": "<Suchintention, z.B. Navigational / Brand>",
+      "kategorie": "<Kategorie, z.B. Brand>",
+      "prioritaet": "<Hoch, Mittel oder Niedrig>"
+    }
+  ],
+  "anzeigentexte": [
+    {
+      "kampagne": "<Kampagnenname>",
+      "anzeigengruppe": "<Anzeigengruppenname>",
+      "headlines": ["<Headline 1 max. 30 Zeichen>", "<Headline 2 max. 30 Zeichen>"],
+      "descriptions": ["<Description 1 max. 90 Zeichen>", "<Description 2 max. 90 Zeichen>"]
+    }
+  ]
+}
+
+WICHTIG:
+- Extrahiere die USPs, Zielgruppen, angebotenen Produkte, Marken-Tonalitaet und Keywords aus der Landingpage-Analyse des landing_page_agent und befulle 'landingpage_analyse' praezise gemaess dem Schema. Limitiere dich auf max. 6 USPs, 4 Zielgruppen, 5 Produkte, 3 Tonalitaetsmerkmale und 13 Keywords, damit das feste Tabellenlayout im Template optimal genutzt wird.
+- Fasse alle Kampagnen aus strategy_agent unter 'kampagnen' zusammen (eine Zeile pro Kampagne).
+- Liste alle Keywords aus keyword_agent unter 'keywords' auf.
+- Erstelle fuer jede Anzeigengruppe des copywriter_agent einen eigenen Eintrag unter 'anzeigentexte'.
+- Headlines MUESSEN unter 30 Zeichen bleiben. Descriptions MUESSEN unter 90 Zeichen bleiben.
+- Waehle einen sinnvollen Dateinamen basierend auf der Domain (z.B. kampagne_adsforsocial.xlsx).
+- Gib nach dem Export nur den absoluten Pfad der exportierten Datei zurueck."""),
+        description="Konvertiert Kampagnen-Strategien, Keywords, Anzeigentexte und die Landingpage-Analyse in eine formatierte Excel-Datei (.xlsx) mit mehreren Tabellenblaettern.",
+        tools=[save_campaign_as_excel],
+    )
+
+
+_BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+def fetch_landing_page(url: str) -> str:
+    """Laedt den sichtbaren Textinhalt einer Webseite und gibt ihn als Text zurueck.
+
+    Folgt Weiterleitungen, sendet einen Browser-User-Agent und bricht nach einem
+    Timeout ab, damit der Agent bei langsamen oder blockierenden Servern nicht
+    unbegrenzt haengt. (Ersetzt das ADK-Tool fetch_landing_page, das ohne Timeout
+    arbeitet und Redirects nicht folgt.)
+
+    Args:
+        url: Vollstaendige URL der Seite (z.B. https://esn.com). Fehlt das Schema,
+            wird https:// ergaenzt.
+
+    Returns:
+        Den extrahierten Textinhalt, oder eine Fehlermeldung bei Problemen.
+    """
+    import requests
+    from bs4 import BeautifulSoup
+
+    if not url.lower().startswith(("http://", "https://")):
+        url = "https://" + url
+
+    try:
+        response = requests.get(
+            url,
+            timeout=(10, 20),
+            allow_redirects=True,
+            headers={"User-Agent": _BROWSER_UA},
+        )
+    except requests.RequestException as e:
+        return f"Fehler beim Laden der URL {url}: {e}"
+
+    if response.status_code != 200:
+        return f"Seite nicht erreichbar (HTTP {response.status_code}): {url}"
+
+    soup = BeautifulSoup(response.content, "lxml")
+    text = soup.get_text(separator="\n", strip=True)
+    lines = [line for line in text.splitlines() if len(line.split()) > 3]
+    return "\n".join(lines) or f"Kein Textinhalt gefunden unter {url}"
+
+
+def list_google_ads_accounts() -> str:
+    """Listet die erreichbaren Google Ads Kundenkonten (Name + ID) zur Auswahl.
+
+    Ohne gesetzte Google-Ads-Credentials werden Demo-Konten geliefert, damit die
+    Konto-Auswahl sofort funktioniert.
+
+    Returns:
+        JSON-String der Form {"type":"account_picker","accounts":[{"id","name"}]}.
+        Gib dieses JSON unveraendert in einem ```json-Codeblock aus, damit das
+        Frontend daraus ein Auswahl-Dropdown rendert.
+    """
+    import json
+
+    from app.google_ads_client import list_accounts
+
+    return json.dumps(
+        {"type": "account_picker", "accounts": list_accounts()},
+        ensure_ascii=False,
+    )
+
+
+def create_search_campaigns(campaign_data_json: str, customer_id: str = "") -> str:
+    """Legt die finale Kampagnenstruktur ueber die Google Ads API als SUCHKAMPAGNEN an.
+
+    SICHERHEIT (im Code erzwungen, nicht ueberschreibbar): Es werden nur SEARCH-
+    Kampagnen angelegt, ALLES wird PAUSED erstellt und jede Kampagne erhaelt ein
+    festes Tagesbudget von 1 Euro. Ohne gesetzte Google-Ads-Credentials laeuft ein
+    Mock, der die Erstellung lediglich simuliert (es wird nichts real angelegt).
+
+    Args:
+        campaign_data_json: JSON-String mit derselben semantischen Struktur wie
+            beim Excel-Export (Schluessel: domain, kampagnen, keywords,
+            anzeigentexte). Budget- und Kampagnentyp-Angaben darin werden bewusst
+            ignoriert, da die Sicherheitsregeln Vorrang haben.
+        customer_id: Ziel-Kundenkonto (z. B. "123-456-7890"), das der Nutzer
+            zuvor ausgewaehlt und bestaetigt hat. Leer -> Default aus der .env.
+
+    Returns:
+        Ein JSON-String mit dem Ergebnis: Modus (mock/live-pending), Ziel-Konto,
+        angelegte Ressourcen samt Resource-Names, die erzwungenen
+        Sicherheitsregeln und etwaige Warnungen (z. B. zu lange Headlines).
+    """
+    import json
+
+    from app.google_ads_client import build_search_campaigns
+
+    try:
+        plan = json.loads(campaign_data_json)
+    except (json.JSONDecodeError, TypeError) as e:
+        return json.dumps({"error": f"Ungueltiges JSON fuer den Kampagnen-Build: {e}"}, ensure_ascii=False)
+
+    try:
+        result = build_search_campaigns(plan, customer_id or None)
+    except Exception as e:
+        return json.dumps({"error": f"Kampagnen-Build fehlgeschlagen: {e}"}, ensure_ascii=False)
+
+    return json.dumps(result, ensure_ascii=False)
+
+
+def create_campaign_builder_agent():
+    return Agent(
+        name="campaign_builder_agent",
+        model=Gemini(
+            model="gemini-flash-latest",
+            retry_options=types.HttpRetryOptions(attempts=3),
+        ),
+        instruction=apply_rules("""Du bist der Campaign Builder. Du setzt die fertige Kampagnenstruktur ueber die Google Ads API als SUCHKAMPAGNEN auf. Die zugrunde liegende Kampagnen-JSON hat dasselbe Schema wie beim excel_exporter_agent (domain, kampagnen, keywords, anzeigentexte).
+
+UNUMSTOESSLICHE SICHERHEITSREGELN (werden zusaetzlich im Code erzwungen):
+- Es werden AUSSCHLIESSLICH Suchkampagnen (SEARCH) angelegt.
+- ALLES wird auf PAUSED gesetzt. Aktiviere niemals eine Kampagne, Anzeigengruppe oder Anzeige.
+- Jede Kampagne erhaelt ein festes Tagesbudget von 1 Euro. Schlage niemals ein anderes Budget vor und uebernimm kein Budget aus der Strategie.
+
+Halte dich strikt an diesen vierstufigen Ablauf und ueberspringe NIEMALS einen Schritt:
+
+SCHRITT 1 - Konto-Auswahl:
+Rufe das Tool `list_google_ads_accounts` auf. Schreibe dann eine kurze Frage an den Nutzer, in welches Google Ads Konto die Kampagne aufgesetzt werden soll, und haenge das JSON-Ergebnis des Tools UNVERAENDERT in einem ```json-Codeblock an (es hat die Form {"type":"account_picker",...}). Beende dann deinen Zug und WARTE auf die Antwort des Nutzers. Rufe in diesem Schritt NICHT create_search_campaigns auf.
+
+SCHRITT 2 - Namen anpassen:
+Bestimme aus dem Plan die Liste der zu erstellenden Suchkampagnen (Performance Max, Display, Remarketing usw. werden uebersprungen) sowie deren Anzeigengruppen. Frage den Nutzer kurz, ob er die vorgeschlagenen Kampagnen- und Anzeigengruppen-Namen anpassen moechte, und haenge UNMITTELBAR danach einen ```json-Codeblock der Form {"type":"name_editor","campaigns":[{"name":"<Kampagnenname>","ad_groups":["<Anzeigengruppe 1>","<Anzeigengruppe 2>"]}]} an - eine Kampagne pro Eintrag, alle vorgeschlagenen Anzeigengruppen je Kampagne. Beende deinen Zug und WARTE. Der Nutzer antwortet im Format 'Kampagnenname: "X" -> "Y"; Anzeigengruppe: "A" -> "B"'. Merke dir die so bestaetigten FINALEN Namen und verwende sie ab jetzt bei allen Folgeschritten und Tool-Aufrufen.
+
+SCHRITT 3 - Bestaetigung:
+Fasse mit den FINALEN Namen aus Schritt 2 zusammen, was angelegt wird (Anzahl Kampagnen mit ihren neuen Namen, Anzeigengruppen, Keywords, Anzeigen) und betone ausdruecklich: alles PAUSED, festes Tagesbudget 1 Euro, nur Suchkampagnen. Frage explizit, ob im in Schritt 1 gewaehlten Konto (nenne Name UND ID) wirklich aufgesetzt werden soll, und haenge einen ```json-Codeblock {"type":"confirm"} an. Beende deinen Zug und WARTE auf die Bestaetigung.
+
+SCHRITT 4 - Aufsetzen:
+NUR nach ausdruecklicher Bestaetigung ("ja"/"aufsetzen") rufe `create_search_campaigns` auf - mit der VOLLSTAENDIGEN Kampagnen-JSON (Schluessel `domain`, `kampagnen`, `keywords`, `anzeigentexte`) UND dem Argument customer_id = der vom Nutzer in Schritt 1 gewaehlten Konto-ID.
+
+WICHTIG (ohne diese Punkte wird nur eine leere Kampagne ohne Anzeigengruppen und Keywords angelegt):
+- Verwende die KOMPLETTE Kampagnen-JSON aus dem bisherigen Workflow (Strategy + Keyword-Agent + Copywriter). Schicke NIEMALS nur die Sektion `kampagnen`.
+- Ersetze die Namen aus Schritt 2 in ALLEN DREI Sektionen: in `kampagnen[].name`, in `keywords[].kampagne` und `keywords[].anzeigengruppe`, sowie in `anzeigentexte[].kampagne` und `anzeigentexte[].anzeigengruppe`. Sonst gehoeren die Keywords/Anzeigen nicht zu den neuen Kampagnen.
+
+Minimalbeispiel des Aufrufs (gekuerzt) - alle drei Sektionen sind drin und die Namen sind ueberall identisch ersetzt:
+```json
+{
+  "domain": "https://example.com",
+  "kampagnen": [{"name": "Brand Search - X"}],
+  "keywords": [{"kampagne": "Brand Search - X", "anzeigengruppe": "Brand", "keyword": "x"}],
+  "anzeigentexte": [{"kampagne": "Brand Search - X", "anzeigengruppe": "Brand", "headlines": ["..."], "descriptions": ["..."]}]
+}
+```
+
+Bricht der Nutzer ab, setze nichts auf und bestaetige den Abbruch. Gib danach das Ergebnis verstaendlich wieder: Ziel-Konto, angelegte Ressourcen (Anzahl Kampagnen/Anzeigengruppen/Keywords/Anzeigen), Modus (mock oder live) und etwaige Warnungen. Beim Modus mock weise klar darauf hin, dass es eine Simulation ohne echte Google-Ads-Verbindung war und nichts real angelegt wurde.
+
+Falls `create_search_campaigns` mit dem Hinweis "Plan unvollstaendig" antwortet, setze NICHTS weiter auf, sondern rekonstruiere die vollstaendige JSON aus dem bisherigen Gespraech (Strategy + Keywords + Copywriter), wende die Renames in allen drei Sektionen an und rufe das Tool erneut auf."""),
+        description="Setzt die finale Kampagnenstruktur ueber die Google Ads API als Suchkampagnen auf - fragt in drei Schritten Zielkonto, Kampagnen-/Anzeigengruppen-Namen und finale Bestaetigung ab; immer pausiert und mit 1 Euro Tagesbudget (ohne Credentials als Mock-Simulation).",
+        tools=[list_google_ads_accounts, create_search_campaigns],
+    )
+
+
+# Fixed output schema appended to every LP-agent instruction (both the MongoDB
+# branch and the JSON-file fallback). Lists each required field with type and
+# meaning, then gives a complete example. Replaces the older customer_label
+# block — the chat title is now derived directly from this object's `customer`
+# and `product` fields.
+LP_OUTPUT_SCHEMA = """
+
+## Pflicht-Output: Landingpage-Analyse als JSON-Block
+
+Zusaetzlich zur Prosa-Antwort an den Nutzer gibst du am Ende deiner Antwort GENAU EINEN ```json-Codeblock mit folgender festen Struktur aus. Jedes Feld MUSS vorhanden sein. Wenn ein Wert nicht aus der Landingpage ableitbar ist: leere Liste [], leerer String "" oder null. Werte stets auf Deutsch.
+
+Bedeutung der Felder:
+- `customer` (str): Marken-/Firmenname (z. B. "ESN")
+- `product` (str): Hauptprodukt/-leistung in 1-3 Worten (z. B. "Flexpresso Protein Coffee")
+- `landing_page_url` (str): die EXAKTE URL, die analysiert wurde, normalisiert (ohne `https://` und `www.`, ohne abschliessenden Slash). Bei Produktseiten inklusive Pfad - z. B. "esn.com/products/vitamin-d3-k2-120-kaps"
+- `domain` (str): nackte Root-Domain ohne Pfad (z. B. "esn.com"). Wird vom Builder als Default-Domain genutzt
+- `industry` (str): Branche/Vertical (z. B. "Sport-Nutrition E-Commerce")
+- `language` (str): ISO-Code der Hauptsprache der LP ("de"/"en"/...)
+- `geography` (list[str]): Laender-/Regionscodes ("DE","AT","CH",...). Leere Liste wenn nicht erkennbar
+- `brand_usps` (list[str], 3-6): Verkaufsargumente auf Marken-Ebene (gelten fuer alle Produkte des Kunden)
+- `brand_offers` (list[str]): markenweite Promos/Garantien (Versandkosten, Rueckgaberecht, ...)
+- `brand_pain_points` (list[str]): branchenweite Probleme, die die Marke generell adressiert
+- `brand_tagline` (str): zentrale Marken-Claim/Tagline (1 Satz)
+- `product_usps` (list[str], 3-6): produktspezifische Verkaufsargumente
+- `product_offers` (list[str]): produktspezifische Promos (Rabatte, Spar-Abo, ...)
+- `product_pain_points` (list[str]): konkrete Probleme, die DIESES Produkt loest
+- `product_price_anchor` (str): Preis-Anker im Format "ab X,XX EUR" wenn auf LP erkennbar
+- `target_audience` (list[obj], 2-4): Personas mit {persona, needs, intent_stage}
+    - `persona` (str): Kurzbeschreibung
+    - `needs` (str): Hauptbeduerfnis dieser Persona
+    - `intent_stage` (str): genau einer von "awareness", "consideration", "decision"
+- `tonality` (list[str], 3): Tonalitaets-Adjektive (z. B. ["modern","energiegeladen","direkt"])
+- `voice_rules` (obj): konkrete Copy-Regeln mit {address, emojis, sentence_length, exclamation}
+    - `address` (str): "du" oder "Sie"
+    - `emojis` (str): "none" | "sparingly" | "on"
+    - `sentence_length` (str): "short" | "mixed" | "long"
+    - `exclamation` (str): "none" | "on"
+- `cta` (str): dominanter Call-to-Action der LP (z. B. "Jetzt kaufen")
+- `conversion_goals` (list[str]): was zaehlt als Conversion (z. B. ["Produktkauf","Newsletter-Anmeldung"])
+- `lp_keywords` (list[str]): verbatim Begriffe von der LP, die als Keyword-Seeds dienen
+- `competitors` (list[str]): auf der LP erwaehnte oder offensichtliche Mitbewerber
+
+Beispiel (Werte beispielhaft, du fuellst sie aus der echten LP):
+```json
+{
+  "type": "landing_page_analysis",
+  "customer": "ESN",
+  "product": "Flexpresso Protein Coffee",
+  "landing_page_url": "esn.com/products/flexpresso-protein-coffee",
+  "domain": "esn.com",
+  "industry": "Sport-Nutrition E-Commerce",
+  "language": "de",
+  "geography": ["DE","AT","CH"],
+  "brand_usps": ["Made in Germany","Seit 2005","Ueber 1 Mio. Kunden"],
+  "brand_offers": ["Versandkostenfrei ab 60 EUR","60 Tage Rueckgaberecht"],
+  "brand_pain_points": ["Unsichere Qualitaet bei Supplements","Schlechter Geschmack ueblicher Produkte"],
+  "brand_tagline": "Premium Sports Nutrition - made in Germany",
+  "product_usps": ["20g Protein pro Portion","Ohne Zuckerzusatz","Cold-Brew-Verfahren"],
+  "product_offers": ["10% Erstbesteller-Rabatt","Spar-Abo verfuegbar"],
+  "product_pain_points": ["Kaffee ohne Naehrwert","Proteindrinks schmecken kuenstlich"],
+  "product_price_anchor": "ab 24,90 EUR",
+  "target_audience": [
+    {"persona":"Junge Fitness-Enthusiasten","needs":"Protein-Boost im Alltag","intent_stage":"consideration"},
+    {"persona":"Berufstaetige Kaffeetrinker","needs":"Energie + Muskelaufbau in einem","intent_stage":"awareness"}
+  ],
+  "tonality": ["modern","energiegeladen","direkt"],
+  "voice_rules": {"address":"du","emojis":"sparingly","sentence_length":"short","exclamation":"on"},
+  "cta": "Jetzt kaufen",
+  "conversion_goals": ["Produktkauf","Newsletter-Anmeldung"],
+  "lp_keywords": ["Protein-Kaffee","Flexpresso","Whey-Coffee","Iced Coffee Protein"],
+  "competitors": ["MyProtein","Foodspring"]
+}
+```
+
+## Pflicht-Struktur der Prosa
+
+Die Prosa-Antwort MUSS so beginnen:
+- ZUERST eine H1-Überschrift im Format `# LP-Analyse von <landing_page_url>` (verwende den Wert deines `landing_page_url`-Feldes aus dem JSON-Block – inkl. Pfad wenn eine Produktseite analysiert wurde).
+- DANACH die sechs nummerierten Abschnitte in dieser Reihenfolge, jeweils mit Markdown-Überschrift `### N. Titel` und 1-3 Sätzen Inhalt. Lasse keine Sektion weg; wenn Infos fehlen, schreibe das ehrlich in 1 Satz.
+
+1. **Marke & Positionierung** – wer ist der Kunde, in welcher Branche, Tagline, generelle Marktposition
+2. **Brand-Profil** – die wichtigsten Brand-USPs, Brand-Offers/Garantien und welchen branchenweiten Schmerz die Marke insgesamt adressiert
+3. **Produkt-Highlight** – das beworbene Hauptprodukt, seine USPs, Offers und welche konkreten Probleme es löst; Preis-Anker wenn vorhanden
+4. **Zielgruppen** – 2-4 Personas, je Persona Bedarf und Intent-Stage (Awareness/Consideration/Decision)
+5. **Tonalität & Voice** – Tonalitäts-Adjektive, Anredeform, dominanter CTA der LP
+6. **SEA-Hebel** – Conversion-Goals, Geografie, wichtigste LP-Keywords, klare Wettbewerber
+
+## Komplettes Beispiel einer KORREKTEN Antwort
+
+So MUSS deine Antwort strukturiert sein – zuerst die H1 mit der URL, dann die sechs Sektionen als Markdown, dann der JSON-Block direkt darunter, OHNE weiteren Text danach:
+
+---
+
+# LP-Analyse von esn.com/products/flexpresso-protein-coffee
+
+### 1. Marke & Positionierung
+ESN ist ein deutscher Hersteller hochwertiger Sports-Nutrition mit Sitz in Elmshorn und positioniert sich seit 2005 als Premium-Anbieter im DACH-Raum. Die Marke arbeitet unter dem Claim "Premium Sports Nutrition - made in Germany" und richtet sich an leistungsorientierte Fitness-Kunden.
+
+### 2. Brand-Profil
+Die zentralen Brand-USPs sind Made in Germany, eigene Produktion und ueber 1 Mio. Kunden. Markenweite Hebel im Checkout sind Versandkosten frei ab 60 EUR und 60 Tage Rueckgaberecht. ESN adressiert damit den branchenweiten Schmerz, dass Supplements in puncto Qualitaet schwer einzuschaetzen sind.
+
+### 3. Produkt-Highlight
+Beworben wird Flexpresso Protein Coffee - ein Cold-Brew-basiertes Protein-Getraenk mit 20 g Whey pro Portion, ohne Zuckerzusatz. Kernofferte sind 10 % Erstbesteller-Rabatt und ein Spar-Abo; der Preis-Anker liegt bei "ab 24,90 EUR". Das Produkt loest das Problem, dass Kaffee keinen Naehrwert hat und gaengige Proteindrinks kuenstlich schmecken.
+
+### 4. Zielgruppen
+Hauptpersona sind junge Fitness-Enthusiasten (Consideration), die einen Protein-Boost im Alltag suchen. Zweite Persona sind berufstaetige Kaffeetrinker (Awareness), die Energie und Muskelaufbau in einem Produkt wollen. Bestandskunden runden das Bild als Decision-Stage ab.
+
+### 5. Tonalitaet & Voice
+Die Marke spricht modern, energiegeladen und direkt - Anrede im Du, Emojis sparsam, kurze Saetze, gezielte Ausrufe als Akzente. Dominanter Call-to-Action auf der LP ist "Jetzt kaufen".
+
+### 6. SEA-Hebel
+Konversionsziele sind Produktkauf und Newsletter-Anmeldung im DACH-Raum (DE/AT/CH). Wichtigste LP-Keywords sind Protein-Kaffee, Flexpresso und Whey-Coffee. Hauptwettbewerber: MyProtein und Foodspring.
+
+```json
+{
+  "type": "landing_page_analysis",
+  "customer": "ESN",
+  "product": "Flexpresso Protein Coffee",
+  "landing_page_url": "esn.com/products/flexpresso-protein-coffee",
+  "domain": "esn.com",
+  "industry": "Sport-Nutrition E-Commerce",
+  "language": "de",
+  "geography": ["DE","AT","CH"],
+  "brand_usps": ["Made in Germany","Seit 2005","Ueber 1 Mio. Kunden"],
+  "brand_offers": ["Versandkostenfrei ab 60 EUR","60 Tage Rueckgaberecht"],
+  "brand_pain_points": ["Unsichere Qualitaet bei Supplements"],
+  "brand_tagline": "Premium Sports Nutrition - made in Germany",
+  "product_usps": ["20g Protein pro Portion","Ohne Zuckerzusatz","Cold-Brew-Verfahren"],
+  "product_offers": ["10% Erstbesteller-Rabatt","Spar-Abo verfuegbar"],
+  "product_pain_points": ["Kaffee ohne Naehrwert"],
+  "product_price_anchor": "ab 24,90 EUR",
+  "target_audience": [
+    {"persona":"Junge Fitness-Enthusiasten","needs":"Protein-Boost im Alltag","intent_stage":"consideration"}
+  ],
+  "tonality": ["modern","energiegeladen","direkt"],
+  "voice_rules": {"address":"du","emojis":"sparingly","sentence_length":"short","exclamation":"on"},
+  "cta": "Jetzt kaufen",
+  "conversion_goals": ["Produktkauf"],
+  "lp_keywords": ["Protein-Kaffee","Flexpresso","Whey-Coffee"],
+  "competitors": ["MyProtein","Foodspring"]
+}
+```
+---
+
+## END-CHECK (vor dem Senden)
+Bevor du deine Antwort abschickst, pruefe: enthaelt sie am Ende einen ```json-Codeblock mit `"type": "landing_page_analysis"`? Wenn nicht, ist die Antwort UNVOLLSTAENDIG - haenge den Block jetzt an. Eine Antwort ohne diesen Block wird vom nachgelagerten System verworfen und der gesamte Workflow scheitert.
+"""
+
+
+def create_landing_page_agent():
+    tools = [fetch_landing_page]
+    if mongodb_toolset:
+        tools.append(mongodb_toolset)
+        # Hard rule first, workflow second. The output_schema directive sits at
+        # the END of the instruction (where most of the field documentation
+        # lives) — repeating the strict "must end with JSON" rule up here makes
+        # sure the model treats it as a non-negotiable contract, not a footnote.
+        instruction = f"""Du bist der Landingpage-Analyst.
+
+UNUMSTOESSLICHE AUSGABE-REGEL (gilt ohne Ausnahme):
+Jede Antwort von dir MUSS am Ende exakt EINEN ```json-Codeblock vom Typ `landing_page_analysis` enthalten. Eine Antwort ohne diesen Block gilt als nicht erledigt. Das Schema ist unten in dieser Instruction definiert. Diese Regel gilt sowohl bei einer frischen Analyse als auch beim Wiederverwenden eines Cache-Treffers.
+
+CACHE-SCHLUESSEL (sehr wichtig):
+Der Cache-Schluessel ist die VOLLSTAENDIGE URL, die der Nutzer angegeben hat - inklusive Pfad und ggf. Query, OHNE Protokoll, OHNE `www.` und ohne abschliessenden Slash. Eine Brand-Seite ("esn.com") und eine Produktseite ("esn.com/products/vitamin-d3-k2") sind verschiedene Seiten mit unterschiedlichem Inhalt und MUESSEN zwei getrennte Eintraege bekommen. Extrahiere niemals die nackte Domain als Cache-Key, wenn der Nutzer eine spezifische URL mit Pfad uebergibt.
+
+Beispiele fuer korrekte Cache-Keys:
+- Eingabe "https://www.esn.com/" -> Key "esn.com"
+- Eingabe "esn.com/products/vitamin-d3-k2-120-kaps" -> Key "esn.com/products/vitamin-d3-k2-120-kaps"
+
+WORKFLOW (MongoDB MCP):
+Du hast Zugriff auf die MongoDB-Tools des Partners über den MongoDB MCP Server. Bevor du irgendein anderes MongoDB-Tool aufrufst, musst du dich IMMER zuerst mit der Datenbank verbinden:
+Rufe hierzu das Tool `connect` auf und übergebe deinen Verbindungs-String als `connectionStringOrClusterName`: "{mongodb_uri}"
+
+Sobald die Verbindung steht, pruefe immer zuerst in der MongoDB, ob bereits eine Analyse fuer DIESE konkrete URL existiert. Verwende das MongoDB-Tool `find` in der Database `sea_team_lead` und der Collection `customer_profiles` mit einem Filter auf das Feld `url` (z. B. `{{ "url": "esn.com/products/vitamin-d3-k2-120-kaps" }}`). Verwende dabei den oben definierten Cache-Schluessel als Wert von `url`.
+
+CACHE-HIT (Dokument gefunden):
+- Wenn das gefundene Dokument bereits ein Feld `analysis` mit einem `landing_page_analysis`-Objekt enthaelt: gib eine kurze Prosa-Zusammenfassung aus (entweder aus `profile_prose` oder zusammengefasst aus `analysis`) UND haenge `analysis` UNVERAENDERT als JSON-Block an.
+- Wenn das Dokument nur `profile` (Altformat ohne JSON) enthaelt: leite das `landing_page_analysis`-Objekt aus dem Prosa-Profil ab, gib dieses Objekt als JSON-Block am Ende der Antwort aus, UND schreibe das Dokument einmalig per `update-many` (Filter `{{ "url": "<cache-key>" }}`, Update `{{ "$set": {{ "profile_prose": "<bestehende Prosa>", "analysis": <das Objekt> }} }}`) zurueck.
+
+CACHE-MISS (kein Dokument):
+1. Nutze das `fetch_landing_page`-Tool, um den Textinhalt GENAU DER vom Nutzer uebergebenen URL zu laden (nicht der nackten Domain).
+2. Extrahiere alle Felder des Schemas (Identitaet, Brand- und Product-Pools, Audience inkl. Intent-Stage, Tonalitaet, Voice Rules, CTA, Conversion-Goals, LP-Keywords, Competitors) und erstelle die Prosa-Zusammenfassung fuer den Nutzer.
+3. Speichere das Ergebnis per `insert-many` in `sea_team_lead.customer_profiles` mit der Struktur `{{ "url": "<cache-key>", "domain": "<bare-domain>", "profile_prose": "<strukturierte Prosa>", "analysis": <das landing_page_analysis-Objekt> }}` in einer Liste unter `documents`. Setze `url` auf den oben definierten Cache-Schluessel und `domain` auf die nackte Host-Domain (z. B. "esn.com").
+4. Gib in deiner Antwort zuerst die Prosa-Zusammenfassung und am Ende den `landing_page_analysis`-JSON-Block aus.""" + LP_OUTPUT_SCHEMA
+
+    else:
+        tools.extend([load_customer_profile, save_customer_profile])
+        # Same "JSON block is mandatory" framing as the MCP branch, just with
+        # the local-file cache instead of MongoDB. load_customer_profile returns
+        # either the new {profile_prose, analysis} shape or the legacy plain
+        # prose; the agent has to produce a JSON block either way.
+        instruction = """Du bist der Landingpage-Analyst.
+
+UNUMSTOESSLICHE AUSGABE-REGEL (gilt ohne Ausnahme):
+Jede Antwort von dir MUSS am Ende exakt EINEN ```json-Codeblock vom Typ `landing_page_analysis` enthalten. Eine Antwort ohne diesen Block gilt als nicht erledigt. Das Schema ist unten in dieser Instruction definiert. Diese Regel gilt sowohl bei einer frischen Analyse als auch beim Wiederverwenden eines Cache-Treffers.
+
+CACHE-SCHLUESSEL (sehr wichtig):
+Der Cache-Schluessel ist die VOLLSTAENDIGE URL inklusive Pfad - "esn.com" und "esn.com/products/vitamin-d3-k2" sind ZWEI verschiedene Cache-Eintraege. Uebergib daher an `load_customer_profile` und `save_customer_profile` IMMER die exakt vom Nutzer angegebene URL (Pfad inklusive), niemals nur die nackte Domain.
+
+WORKFLOW (lokaler Cache):
+Nutze zuerst das `load_customer_profile`-Tool mit dem Cache-Schluessel als Argument, um zu pruefen, ob fuer DIESE URL bereits eine Analyse gespeichert ist.
+
+CACHE-HIT:
+- Wenn der zurueckgegebene Eintrag bereits ein `analysis`-Feld enthaelt: gib eine kurze Prosa-Zusammenfassung aus und haenge `analysis` UNVERAENDERT als JSON-Block an.
+- Wenn nur Prosa (Altformat) zurueckkommt: leite das `landing_page_analysis`-Objekt aus dieser Prosa ab, gib es als JSON-Block am Ende der Antwort aus UND rufe `save_customer_profile` erneut auf, um die neue, vollstaendige Struktur (`profile_prose` + `analysis`) zu speichern.
+
+CACHE-MISS:
+1. Nutze das `fetch_landing_page`-Tool, um den Textinhalt GENAU DER vom Nutzer uebergebenen URL zu laden (nicht der nackten Domain).
+2. Extrahiere alle Felder des Schemas und erstelle die Prosa-Zusammenfassung.
+3. Speichere die Struktur per `save_customer_profile` mit dem Cache-Schluessel als Argument ab.
+4. Antworte mit Prosa + abschliessendem `landing_page_analysis`-JSON-Block.""" + LP_OUTPUT_SCHEMA
+
+    return Agent(
+        name="landing_page_agent",
+        model=Gemini(
+            model="gemini-flash-latest",
+            retry_options=types.HttpRetryOptions(attempts=3),
+        ),
+        instruction=apply_rules(instruction),
+        description="Analysiert eine Landingpage-URL und extrahiert USPs, Zielgruppen und Kerninformationen unter Verwendung von Caching.",
+        tools=tools,
+    )
+
+
+
+# Fixed output schema for the strategy_agent. Mirrors the LP-agent pattern
+# (front rule + prose structure + complete example + end-check) so the agent
+# reliably produces both a readable 6-section markdown and a strict JSON block
+# that the keyword/copy/builder/excel pipeline can consume deterministically.
+STRATEGY_OUTPUT_SCHEMA = """
+
+## Pflicht-Output: Strategie als JSON-Block
+
+Zusätzlich zur Prosa-Antwort gibst du am Ende GENAU EINEN ```json-Codeblock mit folgender festen Struktur aus. Jedes Feld MUSS vorhanden sein. Wenn ein Wert nicht ableitbar ist: leere Liste [], leerer String "" oder null. Werte stets auf Deutsch.
+
+Bedeutung der Felder:
+- `summary` (str): 2-3 Sätze Empfehlung + Begründung, gespeist aus der landing_page_analysis (Industry, Brand-Stärke, Conversion-Goals, Audience).
+- `total_daily_budget_eur` (number): Tagesbudget gesamt. Default 100, wenn der Nutzer keinen Wert nennt. Die Verteilung MUSS im `summary` oder `rationale` der Kampagnen begründet werden.
+- `geo_targeting` (list[str]): Länder-/Regionscodes. Übernimm `geography` aus der LP-Analyse 1:1.
+- `language_targeting` (str): ISO-Sprachcode. Übernimm `language` aus der LP-Analyse 1:1.
+- `campaigns` (list[obj]): 2-5 Suchkampagnen.
+    - `name` (str): MUSS dem Schicht-Präfix-Schema folgen: `Brand Pure – <Marke>`, `Brand+Produkt – <Produkt|Hero-Produkte>`, oder `Generic – <Use-Case|Hauptthema>` (z. B. "Generic Search – Whey mit Laktase" ist OK weil der "Generic"-Präfix da ist). Ohne Schicht-Präfix wird die Antwort verworfen.
+    - `campaign_type` (str): genau einer von "Search", "Display", "Shopping", "Video", "Remarketing". KEINE Performance-Max-Kampagnen ausgeben – PMax kommt ausschließlich in `pmax_recommendation` als Text.
+    - `purpose` (str): genau einer von "Brand" (für Brand Pure UND Brand+Produkt), "Generic" (Non-Brand). Die Unterscheidung Brand Pure vs Brand+Produkt erfolgt über den Kampagnen-Namen (`name`-Präfix "Brand Pure –" vs "Brand+Produkt –") und über `voice_pool` ("brand" vs "product"). KEINE Werte "Hero", "Promo", "Remarketing", "Competitor" – im Default-Setup gibt es nur diese zwei Purpose-Werte.
+    - `daily_budget_eur` (number): Tagesbudget dieser Kampagne. Summe aller Kampagnen MUSS `total_daily_budget_eur` ergeben.
+    - `budget_share_percent` (number): Anteil am Gesamtbudget (0-100). Summe aller Kampagnen MUSS ~100 ergeben.
+    - `bid_strategy` (str): Freitext, abgeleitet aus den `conversion_goals` der LP (z. B. "Klicks maximieren" bei wenig Datenlage, "Conversions maximieren" oder "Target-CPA" bei klarer Lead/Sale-Zielsetzung).
+    - `primary_conversion_goal` (str): ein konkretes Ziel aus den LP-`conversion_goals` (z. B. "Produktkauf", "Newsletter-Anmeldung").
+    - `rationale` (str): 1-2 Sätze. WORAUS aus der LP wurde diese Kampagne abgeleitet (USPs, Audience-Stage, Wettbewerber, Tagline).
+    - `ad_groups` (list[obj], 1-4): Anzeigengruppen dieser Kampagne.
+        - `name` (str): MUSS dem Schicht-Präfix-Schema folgen — `Brand Pure – <Marke>`, `Brand+Produkt – <Produktname>`, `Generic – <Use-Case|Kategorie>`. Beispiele: "Brand Pure – ESN", "Brand+Produkt – Flexpresso", "Generic – Whey mit Laktase". Ad-Group-Namen mit `vs <Wettbewerber>` sind verboten (NO-COMPETITOR-POLICY).
+        - `intent_stage` (str): genau einer von "awareness", "consideration", "decision". Wähle ihn passend zur Suchintention der Ad-Group.
+        - `voice_pool` (str): "brand" ODER "product". Diese Angabe sagt dem Copywriter, AUS WELCHEM LP-Pool er ziehen muss – Brand-Ad-Groups verwenden `brand_usps`/`brand_tagline`, Produkt-Ad-Groups verwenden `product_usps`/`product_price_anchor`.
+        - `keyword_seed_clusters` (list[str]): 1-3 grobe Cluster-Labels als Hinweis für den Keyword-Agenten. Brand-Pure-Ad-Groups: NUR reine Marken-Token (z. B. ["ESN", "ESN Supplements"]). Brand+Produkt-Ad-Groups: IMMER Brand-Token PLUS Produkt-Token (z. B. ["EVO One Whey", "EVO Whey Laktase"]) — NIE reines Brand-Token allein. Generic-Ad-Groups: Use-Case-/Kategorie-Themen (z. B. ["Whey Protein mit Laktase", "Proteinpulver laktosefrei"]). KEINE Wettbewerbernamen als Seed-Cluster.
+- `recommended_negative_keywords` (list[str], 5-10): generische Negatives, die der Keyword-Agent als Starter-Set übernehmen und erweitern soll (z. B. "kostenlos", "gratis", "jobs", "gebraucht", "ebay", "amazon").
+- `pmax_recommendation` (str): freie Empfehlung in 1-2 Sätzen, ob/wann Performance Max sinnvoll wäre (z. B. "Empfohlen als zweiter Schritt sobald 30 Conversions/30 Tage erreicht sind"). Leer wenn nicht relevant.
+- `skipped_campaign_types` (list[obj]): Channel-Typen, die du BEWUSST nicht empfiehlst, je mit Begründung. Format `{"type": "Shopping", "reason": "kein Produktfeed im Shop erkannt"}`.
+
+## Pflicht-Struktur der Prosa
+
+Die Prosa-Antwort MUSS so beginnen:
+- ZUERST eine H1-Überschrift im Format `# Strategie zu <customer>` (verwende den Marken-/Kundennamen aus der `landing_page_analysis`, z. B. "ESN"; wenn kein klarer Markenname vorliegt, fällt sie auf die nackte Domain zurück, z. B. "esn.com").
+- DANACH die sechs nummerierten Abschnitte in dieser Reihenfolge, jeweils mit Markdown-Überschrift `### N. Titel` und 1-3 Sätzen Inhalt:
+1. **Strategie-Zusammenfassung** – die Empfehlung in 2-3 Sätzen, mit Bezug auf LP-Stärken
+2. **Kampagnenstruktur** – Liste der Kampagnen mit Channel und Zweck
+3. **Budget-Verteilung** – Gesamt + Splits in % und € pro Kampagne, kurze Begründung
+4. **Bid-Strategien & Conversion-Goals** – welche Strategie je Kampagne und warum
+5. **Negative Keywords (Starter-Set)** – die 5-10 vorgeschlagenen Negatives
+6. **Empfehlung & Ausschluss** – PMax-Empfehlung + bewusst weggelassene Channel-Typen mit Grund
+
+## Komplettes Beispiel einer KORREKTEN Antwort
+
+So MUSS deine Antwort aufgebaut sein – zuerst die H1 mit dem Kundennamen, dann die sechs Sektionen Prosa, dann der JSON-Block, OHNE weiteren Text danach:
+
+---
+
+# Strategie zu ESN
+
+### 1. Strategie-Zusammenfassung
+Für ESN empfehlen wir ein dreischichtiges Default-Setup (Marke → Produkt → Lösung): Brand Pure schützt die Markensuchen, Brand+Produkt fängt produktspezifische Kombi-Suchen rund um Flexpresso ab, und Generic skaliert über kategorienahe Pain-Point-Suchen. Tagesbudget 100 €, primäres Ziel: Produktkauf im DACH-Raum.
+
+### 2. Kampagnenstruktur
+Drei Suchkampagnen entlang des Funnels: Brand Pure – ESN (Markenschutz, Homepage), Brand+Produkt – Flexpresso (Produkt-LP), Generic Search – Protein Coffee (Produkt-LP, Use-Case-zentrierte Ad-Groups).
+
+### 3. Budget-Verteilung
+Tagesbudget 100 € gesamt: Brand Pure 12 € (12 %), Brand+Produkt 20 € (20 %), Generic 68 € (68 %). Brand Pure ist klein, weil die Suchen ohnehin konvertieren; Brand+Produkt ist die CR-Schicht zwischen Brand und Generic; Generic ist der Hauptwachstumshebel.
+
+### 4. Bid-Strategien & Conversion-Goals
+Brand Pure: Klicks maximieren (Defense-Logik). Brand+Produkt: Klicks maximieren in Phase „new"/„ramping", Migration zu Conversions maximieren ab 30 Conv./30 Tage. Generic: Conversions maximieren ohne Target, Migration zu tROAS bei „mature". Primäres Conversion-Goal überall: Produktkauf.
+
+### 5. Negative Keywords (Starter-Set)
+"kostenlos", "gratis", "jobs", "gebraucht", "ebay", "amazon", "rezept", "selber machen", "myprotein", "foodspring". Wettbewerbernamen sind hart als Negatives gesetzt (NO-COMPETITOR-POLICY).
+
+### 6. Empfehlung & Ausschluss
+Performance Max ist als zweiter Schritt sinnvoll, sobald 30 Conversions/30 Tage erreicht sind. Shopping ausgelassen (kein Produktfeed/Merchant-Center erkennbar). Competitor-Conquesting per Default deaktiviert.
+
+```json
+{
+  "type": "strategy",
+  "summary": "Dreischichtiges Default-Setup für ESN (Marke→Produkt→Lösung): Brand Pure, Brand+Produkt – Flexpresso, Generic Search – Protein Coffee. Hauptziel: Produktkauf im DACH-Raum.",
+  "total_daily_budget_eur": 100,
+  "geo_targeting": ["DE","AT","CH"],
+  "language_targeting": "de",
+  "campaigns": [
+    {
+      "name": "Brand Pure – ESN",
+      "campaign_type": "Search",
+      "purpose": "Brand",
+      "daily_budget_eur": 12,
+      "budget_share_percent": 12,
+      "bid_strategy": "Klicks maximieren",
+      "primary_conversion_goal": "Produktkauf",
+      "rationale": "Brand-Pure-Schicht: ESN-Markensuchen (1 Mio.+ Kunden, Made in Germany) → Homepage. Defense-Logik, da hohe CR + niedriger CPC.",
+      "ad_groups": [
+        {"name": "Brand Pure – ESN", "intent_stage": "decision", "voice_pool": "brand", "keyword_seed_clusters": ["ESN","ESN Supplements","ESN Shop"]}
+      ]
+    },
+    {
+      "name": "Brand+Produkt – Flexpresso",
+      "campaign_type": "Search",
+      "purpose": "Brand",
+      "daily_budget_eur": 20,
+      "budget_share_percent": 20,
+      "bid_strategy": "Klicks maximieren",
+      "primary_conversion_goal": "Produktkauf",
+      "rationale": "Brand+Produkt-Schicht: Brand-PLUS-Produkt-Kombis (z. B. „esn flexpresso 300g") → Produkt-LP. CR-stark, Migration zu Conversions max. ab 30 Conv./30 Tage.",
+      "ad_groups": [
+        {"name": "Brand+Produkt – Flexpresso", "intent_stage": "decision", "voice_pool": "product", "keyword_seed_clusters": ["ESN Flexpresso","ESN Protein Kaffee","ESN Whey Coffee"]}
+      ]
+    },
+    {
+      "name": "Generic Search – Protein Coffee",
+      "campaign_type": "Search",
+      "purpose": "Generic",
+      "daily_budget_eur": 68,
+      "budget_share_percent": 68,
+      "bid_strategy": "Conversions maximieren",
+      "primary_conversion_goal": "Produktkauf",
+      "rationale": "Generic-Schicht mit Use-Case-Ad-Groups, abgeleitet aus product_pain_points (Whey-Liebhaber, Cold-Brew-Fans, Kaffee statt Shake). Hauptwachstumshebel, ohne Brand-Token.",
+      "ad_groups": [
+        {"name": "Generic – Whey Coffee", "intent_stage": "consideration", "voice_pool": "product", "keyword_seed_clusters": ["Whey Coffee","Whey Protein Kaffee"]},
+        {"name": "Generic – Cold Brew Protein", "intent_stage": "consideration", "voice_pool": "product", "keyword_seed_clusters": ["Cold Brew Protein","Iced Protein Coffee"]},
+        {"name": "Generic – Protein Kaffee Alltagsroutine", "intent_stage": "consideration", "voice_pool": "product", "keyword_seed_clusters": ["Protein Kaffee morgens","Protein Frühstück"]}
+      ]
+    }
+  ],
+  "recommended_negative_keywords": ["kostenlos","gratis","jobs","gebraucht","ebay","amazon","rezept","selber machen","myprotein","foodspring"],
+  "pmax_recommendation": "Empfohlen als zweiter Schritt, sobald 30 Conversions/30 Tage erreicht sind – nicht Teil dieses Setups.",
+  "skipped_campaign_types": [
+    {"type": "Shopping", "reason": "Kein Produktfeed/Merchant-Center auf der LP erkennbar."},
+    {"type": "Display", "reason": "Awareness aktuell ausreichend; Brand schon stark, Budget bewusst auf Suchen konzentriert."},
+    {"type": "Competitor", "reason": "Per Default deaktiviert (NO-COMPETITOR-POLICY) – Wettbewerbernamen laufen stattdessen als Negatives in Generic, das gewonnene Budget liegt auf den drei Default-Schichten."}
+  ]
+}
+```
+
+---
+
+## Zweites Beispiel — `existing_layers: ["brand_pure"]` (Brand Pure läuft schon)
+
+Wenn der Kunde bereits eine eigene Brand-Pure-Kampagne fährt (z. B. EVO SPORTS FUEL mit 5000 Conv./30d, 1000 EUR/Tag, primary_goal "ROAS", target_value "4x", `existing_layers: ["brand_pure"]`), MUSST du genau zwei Kampagnen bauen — Brand+Produkt (15–20 %) und Generic (80–85 %), keinen Brand-Pure-Eintrag in `campaigns`, dafür einen Advisory-Satz in Sektion 6:
+
+```json
+{
+  "type": "strategy",
+  "summary": "Strategisches Setup für EVO SPORTS FUEL (1000 EUR/Tag, Briefing). Da Brand Pure separat läuft, ergänzen wir Brand+Produkt – EVO ONE Whey und skalieren über Generic Search – Whey mit Laktase. Hauptziel: profitable Neukunden bei tROAS 400 %.",
+  "total_daily_budget_eur": 1000,
+  "geo_targeting": ["DE","AT","CH"],
+  "language_targeting": "de",
+  "campaigns": [
+    {
+      "name": "Brand+Produkt – EVO ONE Whey",
+      "campaign_type": "Search",
+      "purpose": "Brand",
+      "daily_budget_eur": 180,
+      "budget_share_percent": 18,
+      "bid_strategy": "Ziel-ROAS (400%)",
+      "primary_conversion_goal": "Produktkauf",
+      "rationale": "Brand+Produkt-Schicht für hochkonvertierende Kombi-Suchen wie „evo one whey kaufen", „evo whey laktose". Diese Schicht fehlt sonst zwischen der bestehenden Brand-Pure-Kampagne (Homepage) und Generic (negt EVO).",
+      "ad_groups": [
+        {"name": "Brand+Produkt – EVO ONE Whey", "intent_stage": "decision", "voice_pool": "product", "keyword_seed_clusters": ["EVO One Whey","EVO Whey Laktase","EVO Whey Protein"]}
+      ]
+    },
+    {
+      "name": "Generic Search – Whey mit Laktase",
+      "campaign_type": "Search",
+      "purpose": "Generic",
+      "daily_budget_eur": 820,
+      "budget_share_percent": 82,
+      "bid_strategy": "Ziel-ROAS (400%)",
+      "primary_conversion_goal": "Produktkauf",
+      "rationale": "Hauptwachstumshebel: laktosefreie Whey-Suchen ohne Markennamen. Mature-Phase erlaubt tROAS 400 %. Ad-Groups primär nach Use-Case (Pain-Points aus LP).",
+      "ad_groups": [
+        {"name": "Generic – Whey mit Laktase", "intent_stage": "decision", "voice_pool": "product", "keyword_seed_clusters": ["Whey Protein mit Laktase","Whey Laktase"]},
+        {"name": "Generic – Laktosefreies Proteinpulver", "intent_stage": "consideration", "voice_pool": "product", "keyword_seed_clusters": ["laktosefreies Proteinpulver","Eiweißpulver bei Laktoseintoleranz"]},
+        {"name": "Generic – Muskelaufbau Laktoseintoleranz", "intent_stage": "consideration", "voice_pool": "product", "keyword_seed_clusters": ["Muskelaufbau Laktoseintoleranz","Protein bei Laktose"]}
+      ]
+    }
+  ],
+  "recommended_negative_keywords": ["kostenlos","gratis","jobs","karriere","gebraucht","ebay","amazon","rezept","selber machen","forum","esn","more nutrition","foodspring","myprotein"],
+  "pmax_recommendation": "Sobald Generic + Brand+Produkt stabil tROAS 400 % erreichen, ist PMax als Folge-Schritt sinnvoll.",
+  "skipped_campaign_types": [
+    {"type": "Shopping", "reason": "Kein Produktfeed/Merchant Center auf der LP erkennbar."},
+    {"type": "Display", "reason": "Bei tROAS-Fokus von 400 % wird das Budget bewusst auf kaufbereite Suchen konzentriert."},
+    {"type": "Competitor", "reason": "Per Default deaktiviert (NO-COMPETITOR-POLICY) – ESN, MyProtein, Foodspring, More Nutrition laufen als Negatives in Generic."}
+  ]
+}
+```
+
+In Sektion 6 dieses Beispiels MUSS folgender Advisory-Satz für die übersprungene Brand-Pure-Schicht auftauchen:
+
+> **Hinweis zur bestehenden Brand-Pure-Kampagne:** Bitte ergänze dort die Produkt-Token „one whey" und „whey laktase" als ausschließende Keywords, damit der Brand+Produkt-Traffic in der neuen Kampagne landet — sonst schaltet die Brand-Pure-Kampagne weiter ihre generische Homepage-Anzeige auf produktspezifische Suchen.
+
+---
+
+## END-CHECK (vor dem Senden)
+Bevor du deine Antwort abschickst, prüfe systematisch:
+1. Beginnt die Antwort mit der H1 `# Strategie zu <customer>`?
+2. Sind ALLE sechs Prosa-Sektionen mit `### N.`-Überschriften in der richtigen Reihenfolge vorhanden?
+3. Enthält die Antwort am Ende GENAU einen ```json-Codeblock mit `"type": "strategy"`?
+4. Summe `daily_budget_eur` = `total_daily_budget_eur`? Summe `budget_share_percent` ≈ 100?
+5. **No-Competitor-Check (HART):** Scanne ALLE `campaigns[].purpose`, `campaigns[].name`, `ad_groups[].name` und `ad_groups[].keyword_seed_clusters`. Wenn IRGENDWO `"Competitor"`, `"Conquesting"`, `"Conquest"`, `"vs "` (als Name-Präfix) ODER ein konkreter Wettbewerbername aus `landing_page_analysis.competitors` auftaucht: **regeneriere die Antwort komplett** — ersetze die Competitor-Kampagne durch eine zusätzliche Brand+Produkt- oder Generic-Schicht, verteile das frei werdende Budget anteilig auf die verbleibenden Performance-Kampagnen. Falls die LP `competitors` nennt, MUSS `skipped_campaign_types` einen Eintrag mit `{"type":"Competitor","reason":"Per Default deaktiviert (NO-COMPETITOR-POLICY) ..."}` enthalten und ALLE Wettbewerbernamen MÜSSEN in `recommended_negative_keywords` (kleingeschrieben) auftauchen. Prüfe das jetzt.
+6. **Drei-Schicht-Default-Check:** Im Default (`existing_layers: []`) MUSS `campaigns` GENAU drei Einträge enthalten: eine Brand-Pure-Kampagne (Name "Brand Pure – ...", `voice_pool: "brand"`), eine Brand+Produkt-Kampagne (Name "Brand+Produkt – ...", `voice_pool: "product"`, `intent_stage: "decision"`) und eine Generic-Kampagne (Name "Generic ... – ...", `voice_pool: "product"`). Pro Eintrag in `existing_layers` fällt die entsprechende Kampagne weg UND in Sektion 6 muss der passende Advisory-Satz stehen (siehe DREI-SCHICHT-DEFAULT-PFLICHT). Wenn `existing_layers` alle drei Werte enthält, ist `campaigns: []` korrekt und `summary` enthält die Optimierungs-Empfehlung. Prüfe jetzt.
+7. **Naming-Konvention-Check (HART):** Trägt JEDER `campaigns[].name` einen der drei Präfixe "Brand Pure –", "Brand+Produkt –" oder "Generic" (z. B. "Generic Search – ..." oder "Generic – ...")? Trägt JEDER `ad_groups[].name` einen der drei Präfixe "Brand Pure –", "Brand+Produkt –" oder "Generic –"? Wenn nicht, ergänze die Präfixe — sonst kann der Excel-Export und der Builder die Schicht nicht ableiten.
+8. **Brand+Produkt-Bauregeln-Check:** (a) Wenn eine Brand+Produkt-Kampagne existiert: maximal 3 Ad-Groups (harte Obergrenze). (b) Jede Brand+Produkt-Ad-Group hat `keyword_seed_clusters` mit Brand-Token PLUS Produkt-Token (NIE nur Brand-Token allein). (c) Geschmacksrichtungen/Varianten sind KEINE eigenen Ad-Groups. (d) Same-URL-Scope-Pflicht: alle Produkte zahlen auf den im Briefing analysierten URL-Scope ein. Wenn die LP nur ein Produkt zeigt, gibt es genau 1 Brand+Produkt-Ad-Group. Korrigiere wenn nötig.
+9. **Generic-Use-Case-Check:** Wenn eine Generic-Kampagne existiert: 2–4 Ad-Groups. Primäre Achse ist Use-Case/Problem (aus `product_pain_points` → `lp_keywords`). Fallback auf Produkt-Kategorie nur wenn die LP keine Pain-Points liefert — dann MUSS der `rationale` der jeweiligen Ad-Group den Satz "Fallback auf Produktkategorie, da die Landingpage keine klaren Pain-Points liefert — CRO-Hinweis: ..." enthalten.
+10. **Generic-Cluster-Check:** Enthält irgendein `ad_groups[].keyword_seed_clusters` einen der verbotenen Werte ("Wettbewerber", "Competitor", "Premium", "Supplements") ODER einen konkreten Wettbewerbernamen (z. B. "MyProtein", "Foodspring", "ESN" — sofern nicht eigener Markenname, "More Nutrition")? Wenn ja, ersetze sie oder lösche die Ad-Group.
+11. **Floskel-Check:** Enthält irgendein `skipped_campaign_types[].reason` eine der verbotenen Phrasen ("Streuverluste minimieren", "Conversion-Intent zu gering", "Fokus auf hochpräzise Suchanfragen", "Budget zunächst voll auf X konzentrieren", "nicht priorisiert", "in dieser Phase nicht relevant") OHNE konkretes LP-Signal? Wenn ja, formuliere die Begründung neu mit konkretem Bezug auf LP/Setup.
+12. **Negatives-Sprache:** Stehen ALLE `recommended_negative_keywords` in der Sprache aus `landing_page_analysis.language`? Wenn die LP Deutsch ist und du englische Standard-Negs wie "free"/"cheap"/"recipe"/"how to make"/"review" siehst → ersetzen durch die deutschen Äquivalente ("kostenlos"/"günstig"/"rezept"/"selber machen"/"test").
+13. **Bid-Strategy-Phasen-Check:** Stimmt die `bid_strategy` jeder Kampagne mit der BID-STRATEGY-MATRIX überein? Bei `account_phase: "new"` MUSS jede Kampagne "Klicks maximieren" haben. Bei "ramping" MUSS es "Conversions maximieren" sein - NICHT "Maximize Conversion Value" (zu früh ohne Datenbasis). tROAS/tCPA mit konkretem Target nur bei "mature".
+Wenn auch nur einer dieser Punkte nicht erfüllt ist, korrigiere die Antwort jetzt. Sonst scheitert der Workflow.
+"""
+
+
+def create_strategy_agent():
+    # When MongoDB MCP is configured we hand the toolset to the strategy agent
+    # so it can persist its result into the per-URL customer profile (the same
+    # collection the landing_page_agent reads from). The directive lives at the
+    # very end of the instruction so the model still treats the END-CHECK as
+    # the immediate pre-send validation.
+    extra_tools = [mongodb_toolset] if mongodb_toolset else []
+    persist_block = mongodb_persist_directive("strategy") if mongodb_toolset else ""
+    # The skill file is the agent's domain playbook (frameworks, anti-patterns,
+    # industry defaults). Kept separate from this file so it can be edited
+    # without touching agent.py. Wrapped between explicit markers so the model
+    # treats it as reference knowledge, not behavioural rules — the schema
+    # below (and the END-CHECK) remain the source of truth for output shape.
+    skill_text = cached_skill("strategy_skill")
+    skill_block = (
+        "\n\n## Domänen-Playbook (Strategy Skill)\n\n"
+        "Die folgende Markdown-Datei ist dein verbindliches SEA-Playbook für E-Commerce. "
+        "Konsultiere sie bei JEDER Strategie-Empfehlung, leite Frameworks, Bid-Strategien und "
+        "Anti-Patterns daraus ab. Bei Konflikt mit dem JSON-Output-Schema unten gewinnt das Schema; "
+        "bei Konflikt mit den ABLEITUNGS-REGELN gewinnen die ABLEITUNGS-REGELN. Das Playbook prägt "
+        "die *Inhalte* deiner Empfehlung (welche Säulen, welche Match-Types, welches Budget-Split-Argument), "
+        "nicht die *Form*.\n\n"
+        "--- PLAYBOOK START ---\n"
+        f"{skill_text}\n"
+        "--- PLAYBOOK ENDE ---\n"
+    ) if skill_text else ""
+    return Agent(
+        name="strategy_agent",
+        model=Gemini(
+            model="gemini-flash-latest",
+            retry_options=types.HttpRetryOptions(attempts=3),
+        ),
+        tools=extra_tools,
+        instruction=apply_rules(skill_block + """Du bist der SEA-Strategie-Spezialist.
+
+UNUMSTÖSSLICHE AUSGABE-REGEL (gilt ohne Ausnahme):
+Jede Antwort von dir MUSS am Ende exakt EINEN ```json-Codeblock vom Typ `strategy` enthalten und davor sechs nummerierte Prosa-Sektionen wie unten beschrieben. Eine Antwort ohne diesen Block oder mit fehlenden Sektionen gilt als nicht erledigt.
+
+INPUT-NUTZUNG:
+Du erhältst vom Team Lead die `landing_page_analysis` UND - falls vorhanden - den `account_briefing`-Block aus diesem Chat. Beide sind VERBINDLICHE Grundlage:
+
+Aus der LP-Analyse: `industry`, `brand_*`, `product_*`, `target_audience`, `tonality`, `conversion_goals`, `geography`, `language`, `lp_keywords`, `competitors`.
+
+Aus dem `account_briefing` (Pflicht, falls vorhanden):
+- `daily_budget_eur` → wenn nicht null, übernimm es EXAKT als `total_daily_budget_eur`. Erwähne im `summary` woher das Budget kommt ("aus dem Briefing übernommen"). Wenn null → Default 100 EUR/Tag mit kurzer Begründung im `summary`.
+- `conversions_last_30d` UND `account_phase` → bestimmen die Bid-Strategie deterministisch (siehe BID-STRATEGY-MATRIX unten). Den vom Team Lead derivierten `account_phase` 1:1 vertrauen, NICHT eigenmächtig umdeuten.
+- `primary_goal` ("ROAS" | "CPA" | "revenue_growth" | "brand_awareness") → diktiert die Ziel-Richtung. Bei `mature` wird der Zielwert (`target_value`, z. B. "4x") tatsächlich als Target gesetzt; bei `new` / `ramping` wird das Ziel im `rationale` als "Migrations-Ziel nach Datenaufbau" erwähnt.
+- `target_value` → wenn vorhanden, erwähne den Zielwert konkret im `summary` oder im `rationale` der relevanten Kampagne.
+- `existing_layers` (list[str], Werte aus `["brand_pure","brand_product","generic"]`) → diktiert welche der drei Default-Schichten der Kunde BEREITS betreibt und die du daher NICHT neu bauen sollst. Leere Liste `[]` = Greenfield, du baust alle drei. Pro übersprungener Schicht ist ein konkreter **Advisory-Satz** in Prosa-Sektion 6 Pflicht (siehe DREI-SCHICHT-DEFAULT-PFLICHT unten). Wenn alle drei Schichten im Briefing als existierend gemeldet sind, baust du KEINE Kampagne und schreibst stattdessen im `summary` eine Optimierungs-Empfehlung.
+- `notes` → freier Kontext, nutze ihn um deine Entscheidungen zu schärfen (z. B. Saisonalität, spezifische Produktlinie, Wettbewerbsdruck).
+
+BID-STRATEGY-MATRIX (verbindlich, abgeleitet aus Playbook Kapitel 2):
+- `account_phase: "new"` (0 Conversions oder Tracking nicht eingerichtet)
+  → fuer ALLE Kampagnen "Klicks maximieren". Smart Bidding ist nicht moeglich, da keine Conversion-Datenbasis existiert. Im `rationale` erwaehnen: "Migration zu Conversions maximieren nach Aufbau der ersten ~15 Conversions, danach zu tROAS/tCPA nach 30+ Conversions/30 Tage."
+- `account_phase: "ramping"` (1-29 Conversions/30 Tage)
+  → fuer Generic "Conversions maximieren" (COUNT-basiert, OHNE Target). NICHT "Maximize Conversion Value" verwenden - die Value-Variante braucht selbst die gleiche Datenbasis wie tROAS und ist in Ramping zu fruh. Brand Pure und Brand+Produkt bekommen "Klicks maximieren". Im `rationale` Migration zu tROAS/tCPA nach 30+ Conv./30 Tage erwaehnen.
+- `account_phase: "mature"` (30+ Conversions/30 Tage)
+  → je nach `primary_goal`: bei "ROAS" tROAS mit `target_value` als konkretem ROAS-Wert; bei "CPA" tCPA mit `target_value`; bei "revenue_growth" "Maximize Conversion Value" ohne Target; bei "brand_awareness" "Klicks maximieren" oder Brand-Defense-Logik.
+
+NEGATIVE-KEYWORDS-SPRACHE (Pflicht):
+`recommended_negative_keywords` MUSS in der Sprache stehen, die in `landing_page_analysis.language` festgelegt ist. Bei `language: "de"` sind alle Negatives auf Deutsch zu formulieren (z. B. "kostenlos", "gratis", "rezept", "selber machen", "gebraucht", "ebay", "amazon", "test", "studie"). Englische Standard-Negs wie "free", "cheap", "recipe", "how to make" bei deutschsprachigen LPs sind ein Halluzinations-Fehler und vor dem Senden zu korrigieren. Dieselbe Regel gilt fuer Negatives die du in `notes` oder `rationale` erwaehnst.
+
+Konfliktregel: das `account_briefing` schlägt jeden Default. Die LP-Analyse liefert Branchen-/Marken-/Audience-Wissen, das Briefing liefert das ökonomische Setup.
+
+ABLEITUNGS-REGELN (wichtig für Konsistenz mit den anderen Agenten):
+- Lege für jede Kampagne die `purpose` ("Brand" oder "Generic") klar fest – Keyword-Agent und Copywriter bauen darauf auf. Die Unterscheidung Brand Pure vs Brand+Produkt erfolgt über `name`-Präfix und `voice_pool`. "Competitor"/"Hero"/"Promo"/"Remarketing" sind im Default-Setup KEINE gültigen Werte.
+- Setze pro Ad-Group `voice_pool` auf "brand" für Brand-Themen und auf "product" für Produkt-/Generic-Themen. Das ist die zentrale Brücke zwischen LP (`brand_usps` vs `product_usps`) und Copy.
+- `bid_strategy` ist Freitext, MUSS aber zu den `conversion_goals` aus der LP passen (z. B. bei "Produktkauf" + wenig Datenlage zunächst "Klicks maximieren", später "Conversions maximieren" / "Target-CPA").
+- Empfehle KEINE Performance Max in `campaigns` – PMax nur als Text im Feld `pmax_recommendation`.
+- Gib 5-10 sinnvolle Negative-Keyword-Vorschläge als Starter-Set in `recommended_negative_keywords` – der Keyword-Agent erweitert sie später.
+- Liste in `skipped_campaign_types` bewusst weggelassene Channels mit kurzer Begründung.
+- Wenn MongoDB-MCP-Tools verfuegbar sind, persistiere dein Ergebnis am Ende laut der MongoDB-Persistenz-Sektion unten - so kann der Nutzer in einer spaeteren Session deine Strategie wiederverwenden, statt sie neu zu bauen.
+
+NO-COMPETITOR-POLICY (hart, gilt IMMER ohne Ausnahme — auch wenn die LP konkrete Wettbewerber listet):
+- Wir empfehlen GRUNDSÄTZLICH KEINE eigene Competitor-/Conquesting-Säule. Folgende Konstrukte sind in der Ausgabe ALLE verboten und führen zur sofortigen Neugenerierung:
+    a) Eine Kampagne mit `purpose: "Competitor"`.
+    b) Ein `campaigns[].name`, der eines dieser Tokens enthält: "Competitor", "Conquesting", "Conquest", "vs ".
+    c) Ein `ad_groups[].name`, der mit `vs ` beginnt ODER einen konkreten Wettbewerbernamen aus `landing_page_analysis.competitors` enthält.
+    d) Ein `keyword_seed_clusters`-Eintrag, der einen Wettbewerbernamen enthält oder eines der Floskel-Tokens ("Competitor", "Wettbewerber", "Premium", "Supplements").
+- Begründung: hohe CPCs auf Wettbewerber-Brand-Suchen, schwacher Conversion-Pfad (User vergleicht noch), markenrechtliche Risiken in der Copy, und in der Praxis schwache, defensiv wirkende Headlines. Diese Logik ist nicht verhandelbar — auch wenn das Budget hoch ist (z. B. 1000 EUR/Tag) und die LP viele Wettbewerber listet (z. B. ESN/MyProtein/Foodspring/More Nutrition), gilt sie unverändert.
+- Wettbewerber-Behandlung stattdessen: wenn die `landing_page_analysis` `competitors` enthält, übernimm ALLE Wettbewerbernamen 1:1 in `recommended_negative_keywords` (kleingeschrieben, ohne Sonderzeichen). Das ist die einzige Berührung mit Wettbewerbernamen.
+- Pflicht-Eintrag in `skipped_campaign_types`: wenn die LP konkrete `competitors` listet, füge `{"type": "Competitor", "reason": "Per Default deaktiviert (NO-COMPETITOR-POLICY) – Wettbewerbernamen <Liste> laufen als Negatives in den Performance-Kampagnen, gewonnenes Budget fließt in Brand+Produkt und Generic."}` hinzu. Wenn die LP KEINE Wettbewerber listet, ist KEIN Skipped-Eintrag für "Competitor" nötig.
+
+DREI-SCHICHT-DEFAULT-PFLICHT (universell, siehe Playbook Kapitel 1):
+Wir bauen ALS DEFAULT GENAU DREI KAMPAGNEN — kein mehr, kein weniger. Hero, Promo, Remarketing und Competitor sind alle gestrichen. Die drei Schichten sind:
+
+    1) **Brand Pure** — `purpose: "Brand"`, `voice_pool: "brand"`, Final-URL = Homepage/Shop, EXACT-dominant, Bid "Klicks maximieren" (Defense). 1 Ad-Group (Single-Brand) bzw. 1 pro Sub-Brand (Multi-Brand-Holding). `keyword_seed_clusters` enthält NUR reine Marken-Token (z. B. ["ESN", "ESN Supplements"]) — NIE Produkt-Token. Budget-Default 10–15 %.
+    2) **Brand + Produkt** — `purpose: "Brand"`, `voice_pool: "product"`, `intent_stage: "decision"`, Final-URL = Produkt-LP, EXACT-dominant. EINE Ad-Group pro Produkt(-Linie); Geschmäcker/Varianten gehören NICHT in eigene Ad-Groups sondern als Keywords in dieselbe. HARTE OBERGRENZE: **maximal 3 Brand+Produkt-Ad-Groups pro Lauf** — bei Brands mit vielen SKUs wähle die 3 prominentesten aus der LP. ALLE Brand+Produkt-Ad-Groups MÜSSEN auf Produkt-LPs unter demselben URL-Scope wie die im Briefing analysierte LP einzahlen (Same-URL-Scope-Pflicht — keine Produkte „aus dem Rest-Sortiment" dazuerfinden, die nicht auf der konkreten LP vorkommen). `keyword_seed_clusters` enthält IMMER Brand-Token PLUS Produkt-Token (z. B. ["EVO One Whey", "EVO Whey Laktase"]) — NIE reines Brand-Token allein. Budget-Default 15–25 %.
+    3) **Generic / Non-Brand** — `purpose: "Generic"`, `voice_pool: "product"`, Final-URL = Produkt-LP, PHRASE-dominant. Ad-Group-Achse PRIMÄR **Use-Case / Problem** (Achse c), abgeleitet aus `landing_page_analysis.product_pain_points` → wenn leer, dann `lp_keywords` → wenn auch dünn, FALLBACK auf Produkt-Kategorie mit dem Pflicht-Satz im `rationale`: "Fallback auf Produktkategorie, da die Landingpage keine klaren Pain-Points liefert — CRO-Hinweis: Pain-Points auf der LP schärfen würde diese Schicht spitzer machen." 2–4 Ad-Groups pro Lauf (nicht weniger, nicht mehr). Budget-Default 60–75 %.
+
+NAMING-KONVENTION (hart, sonst Disqualifikation):
+Jede Kampagne und jede Ad-Group MUSS ein Schicht-Präfix tragen — exakt diese Form:
+    - `Brand Pure – <Marke>` (Kampagne) und `Brand Pure – <Marke|Sub-Brand>` (Ad-Group)
+    - `Brand+Produkt – <Produktname>` (Kampagne und Ad-Group identisch wenn nur 1 Produkt, sonst Kampagnenname kann "Brand+Produkt – Hero-Produkte" lauten und Ad-Groups pro Produkt)
+    - `Generic – <Use-Case|Kategorie>` (Kampagne kann "Generic Search – <Hauptthema>" sein, Ad-Groups jeweils mit Use-Case-Suffix)
+Beispiele aus realen Läufen: `Brand Pure – ESN`, `Brand+Produkt – Flexpresso`, `Generic – Whey mit Laktase`. Beim Builder/Excel-Export wird das Präfix zum Filtern benutzt — fehlt es, scheitert der Export.
+
+LAYER-SKIPPING via `existing_layers` (Pflicht, siehe Playbook Kapitel 1b):
+- Wenn `existing_layers` einen der drei Werte enthält, baust du diese Schicht NICHT, sondern schreibst stattdessen einen konkreten **Advisory-Satz** in Prosa-Sektion 6 ("Empfehlung & Ausschluss"):
+    - `"brand_pure"` skipped → "Hinweis zur bestehenden Brand-Pure-Kampagne: Bitte ergänze dort die Produkt-Token (z. B. ‚<konkretes-produkt-token>') als Negatives, damit der Brand+Produkt-Traffic in der neuen Kampagne landet."
+    - `"brand_product"` skipped → "Hinweis zur bestehenden Brand+Produkt-Kampagne: Bitte stelle sicher, dass die Brand-Pure-Kampagne dort die Produkt-Token sauber als Negatives gesetzt hat, damit sich die Schichten nicht überlappen."
+    - `"generic"` skipped → "Hinweis zur bestehenden Generic-Kampagne: Bitte stelle sicher, dass dort die eigenen Markennamen UND die Wettbewerber-Brands als Ad-Group-Negatives stehen, damit Generic weder mit Brand-Pure noch mit Konkurrenz-Brand-Suchen überlappt."
+- Pro skipped Layer ein EIGENER Advisory-Satz — bei 2 skipped Layern stehen 2 Advisories in Sektion 6.
+- Budget-Skipping-Verteilung: das frei werdende Budget wird auf die verbleibenden Schichten anteilig hochskaliert, mit **Tilt Richtung Generic** (Generic ist immer der größte Wachstumshebel). Konkret:
+    - `["brand_pure"]` → Brand+Produkt 15–20 %, Generic 80–85 %.
+    - `["brand_pure", "brand_product"]` → Generic = 100 %.
+    - `["generic"]` → Brand Pure 30 %, Brand+Produkt 70 %.
+- Edge-Case `["brand_pure","brand_product","generic"]` (alle drei laufen schon): `campaigns` bleibt LEER, `summary` enthält "Alle drei Schichten laufen laut Briefing bereits. Empfehlung: keine neue Strategie, sondern Optimierung der bestehenden Kampagnen (Bid-Tuning, Negative-Audit, RSA-Refresh)."
+
+KONKRETE SKIPPED-REASONS (hart):
+Jeder Eintrag in `skipped_campaign_types[].reason` MUSS sich auf ein konkretes Signal beziehen. Erlaubte Begründungstypen sind:
+- Fehlende technische Voraussetzung – z. B. "kein Produktfeed/Merchant Center auf der LP erkennbar" (Shopping)
+- Budget-Realität – z. B. "bei nur 100 EUR/Tag verwässert Display den Brand-/Generic-Effekt"
+- LP-Signal – z. B. "Brand bereits stark laut LP-USPs – Display-Awareness aktuell nicht prioritär"
+- Conversion-Datenlage – z. B. "PMax braucht 30 Conv/30 Tage – noch nicht verfügbar"
+- Policy-Default – z. B. "Per Default deaktiviert (NO-COMPETITOR-POLICY)" (Competitor)
+
+VERBOTENE BEGRÜNDUNGEN (eine Antwort, die diese Phrasen als alleinige Begründung verwendet, gilt als nicht erledigt):
+- "Streuverluste minimieren" / "zu hohe Streuverluste" / "Streuverluste vermeiden"
+- "Conversion-Intent zu gering"
+- "Fokus auf hochpräzise Suchanfragen"
+- "Budget zunächst voll auf X konzentrieren"
+- "nicht priorisiert"
+- "in dieser Phase nicht relevant"
+Diese Phrasen sind generische Marketing-Floskeln ohne LP-Bezug. Wenn du eine davon verwendest, MUSST du sie mit einem konkreten LP-/Setup-Signal kombinieren (z. B. "Streuverluste, da die LP keine Display-tauglichen visuellen Assets liefert" – das wäre OK, weil ein LP-Signal genannt wird).""" + STRATEGY_OUTPUT_SCHEMA + persist_block),
+        description="Erstellt strategische Kampagnenstrukturen, Budgetverteilung und Bid-Strategien aus der landing_page_analysis. Default-Setup: drei Schichten Marke→Produkt→Lösung (Brand Pure, Brand+Produkt, Generic) mit voice_pool-Hinweisen für den Copywriter. Skipping via account_briefing.existing_layers. Keine Competitor-Conquesting-Kampagnen (Default-Policy).",
+    )
+
+
+# Fixed output schema for the keyword_agent. Mirrors the LP/Strategy pattern:
+# strict structure that the builder and copywriter can read deterministically.
+# The new shape is NESTED per campaign/ad_group (matches the Strategy output),
+# NOT the flat clusters[] shape the old Excel pipeline used — the Team Lead is
+# responsible for flattening when handing off to excel/builder.
+KEYWORDS_OUTPUT_SCHEMA = """
+
+## Pflicht-Output: Keyword-Recherche als JSON-Block
+
+Zusätzlich zur Prosa-Antwort gibst du am Ende GENAU EINEN ```json-Codeblock mit folgender festen Struktur aus. Jedes Feld MUSS vorhanden sein. Werte stets auf Deutsch.
+
+Bedeutung der Felder:
+- `summary` (str): 2-3 Sätze. Total-Anzahl Keywords, grobe Match-Type-Verteilung, Schwerpunkte.
+- `campaigns` (list[obj]): exakt die Kampagnen aus der `strategy` (gleiche `name`-Werte – 1:1 übernehmen).
+    - `name` (str): identisch zum Strategy-Kampagnennamen.
+    - `campaign_negatives` (list[str], 5-15): kampagnenweite Negatives. Übernimm zunächst die `recommended_negative_keywords` aus der Strategy und erweitere sie um 3-5 weitere Branchen-/Use-Case-spezifische Negatives (z. B. "rezept", "selber machen", "wikipedia", "youtube" bei E-Commerce).
+    - `ad_groups` (list[obj]): exakt die Ad-Groups aus der `strategy.campaigns[].ad_groups` (gleiche `name`-Werte).
+        - `name` (str): identisch zur Strategy-Ad-Group.
+        - `intent_stage` (str): "awareness" | "consideration" | "decision" – übernimm den Wert aus der Strategy.
+        - `voice_pool` (str): "brand" | "product" – übernimm den Wert aus der Strategy. Das bestimmt, ob die Keywords markennah ("esn", "esn supplements") oder produktnah ("vitamin d3 k2 kaufen", "knochengesundheit") gewählt werden.
+        - `cluster_rationale` (str): EIN Satz. Warum diese Auswahl, woraus aus LP/Strategy abgeleitet (`lp_keywords` / `keyword_seed_clusters` referenzieren), und welcher Match-Type-Mix dominiert.
+        - `keywords` (list[obj], 3-20): Liste der Keywords. Soft-Target 5-15 je Ad-Group, hard 3-20. Bei Brand-Ad-Groups sind 3-7 OK (Brand-Term + wenige Varianten); bei breiteren Generic-Clustern sind bis zu 20 OK. Begründe eine Abweichung von 5-15 im `cluster_rationale` mit einem Halbsatz.
+            - `keyword` (str): das Keyword in Kleinschreibung, OHNE Match-Type-Klammern (kein "[...]" oder Anführungszeichen).
+            - `match_type` (str): genau einer von "EXACT", "PHRASE", "BROAD".
+            - `use_in_copy` (bool): true = **Headline-Anchor** (Copywriter zieht daraus seine Säule-1-Headlines), false = **Bidding-Only** (wird gebucht, aber NICHT in Headlines verwendet). Pro Ad-Group **3-7 Keywords** mit `use_in_copy: true` markieren – das ist Material für die Copy. Klassifikations-Kriterien:
+                - `use_in_copy: true`: reine Brand-Terms ("esn flexpresso"), Spec-Modifier ohne Mehrdeutigkeit ("flexpresso 300g", "flexpresso caramel"), Money-Modifier ("protein kaffee kaufen"), klare Produktnamen-Varianten ("cold brew protein")
+                - `use_in_copy: false`: Retail-Modifier ("flexpresso dm", "flexpresso aldi", "flexpresso rossmann") – würden "bei DM kaufen"-Headlines erzeugen, aber wir leiten zu esn.com; Research-/Test-Tails ("flexpresso erfahrungen", "vergleich", "testsieger") – User recherchiert, Hard-Sell-Headline unpassend; Long-Tail-Discovery ("protein kaffee mit milch", "iced coffee vegan" wenn LP nicht vegan ist) – zu spezifisch für RSA-Mischung
+        - `ad_group_negatives` (list[str], 3-10): CROSS-Negatives, die diese Ad-Group gegen andere abgrenzen. Pflicht: Brand-Ad-Groups MÜSSEN die wichtigsten Generic-Begriffe als Negatives enthalten und umgekehrt – damit verhindern wir, dass Brand- und Generic-Kampagnen auf denselben Suchen miteinander konkurrieren und sich selbst überbieten.
+
+MATCH-TYPE-LOGIK (verbindlich):
+- EXACT: Brand-/Money-Keywords, enge Money-Terms ("esn", "esn flexpresso kaufen", "vitamin d3 k2 depot"). Höchster ROI bei exakten Treffern.
+- PHRASE: mittelspezifische Suchen, bei denen die Wortreihenfolge die Intention prägt ("vitamin d3 k2 hochdosiert", "protein kaffee bestellen").
+- BROAD: nur für generische Discovery-Keywords mit hohem Volumen und niedrigerer Conversion-Wahrscheinlichkeit ("supplements", "abnehmen tipps"). Sparsam einsetzen.
+- Faustregel für den Mix pro Ad-Group: bei Brand und Decision-Stage mehrheitlich EXACT; bei Consideration mehrheitlich PHRASE; bei Awareness/Discovery PHRASE + sparsam BROAD.
+
+ABLEITUNGS-PFLICHTEN (wichtig):
+- 1:1-Übernahme der Kampagnen- und Ad-Group-Namen aus der `strategy`. Erfinde keine neuen.
+- Pro Ad-Group MUSS mindestens ein Keyword aus `landing_page_analysis.lp_keywords` oder `strategy.campaigns[].ad_groups[].keyword_seed_clusters` als Seed verwendet werden – das stellt sicher, dass Keywords aus der LP-Sprache stammen.
+- Cross-Negatives sind PFLICHT: in Brand-Ad-Groups MÜSSEN die zentralen Begriffe der Generic-Ad-Groups als `ad_group_negatives` stehen; in Generic-Ad-Groups MUSS der Marken-Name (und Varianten) als `ad_group_negatives` stehen.
+- `voice_pool: "brand"` → Keywords drehen sich um Markenname + markenweite Begriffe; `voice_pool: "product"` → Keywords drehen sich um Produktname, Anwendungsfälle, Benefits, Wirkstoffe.
+
+## Pflicht-Struktur der Prosa
+
+Die Prosa-Antwort MUSS so beginnen:
+- ZUERST eine H1-Überschrift im Format `# Keyword-Recherche zu <customer>` (verwende den Marken-/Kundennamen aus der LP-Analyse).
+- DANACH die folgenden fünf nummerierten Abschnitte in dieser Reihenfolge, jeweils mit Markdown-Überschrift `### N. Titel` und 1-3 Sätzen Inhalt:
+1. **Keyword-Strategie-Überblick** – Anzahl gesamt, grobe Match-Type-Verteilung, thematische Schwerpunkte
+2. **Cluster pro Kampagne** – pro Kampagne knapp die Ad-Groups + Anzahl Keywords + dominanter Match-Type
+3. **Match-Type-Verteilung** – Begründung warum welcher Mix wo dominiert
+4. **Negative Keywords** – Kampagnen-Negatives als Liste + Cross-Negatives kurz erklärt (Brand negt Generic-Terms und umgekehrt)
+5. **Erweiterungs-Empfehlungen** – Long-Tail / Saison / Phase-2-Themen, die jetzt bewusst NICHT drin sind
+
+## Komplettes Beispiel einer KORREKTEN Antwort
+
+So MUSS deine Antwort aufgebaut sein – zuerst H1, dann fünf Sektionen, dann der JSON-Block, OHNE weiteren Text danach:
+
+---
+
+# Keyword-Recherche zu ESN
+
+### 1. Keyword-Strategie-Überblick
+Insgesamt 32 Keywords über zwei Kampagnen und drei Ad-Groups. Match-Type-Mix: 40 % EXACT (Money-/Brand-Terms), 50 % PHRASE (Produkt + Modifier), 10 % BROAD (sparsam für Discovery). Schwerpunkt liegt auf produktnahen Long-Tail-Suchen rund um Vitamin D3 K2 und Depot-Wirkung.
+
+### 2. Cluster pro Kampagne
+**Brand Search – ESN**: 1 Ad-Group ("Brand Pure", 5 Keywords, mehrheitlich EXACT). **Generic – Vitamin D3 K2 Depot**: 2 Ad-Groups ("Vitamin D3 K2 Depot" mit 14 Keywords PHRASE-dominiert; "Knochengesundheit & Immunsystem" mit 13 Keywords PHRASE + BROAD).
+
+### 3. Match-Type-Verteilung
+Brand-Ad-Group ist EXACT-dominiert, weil Brand-Suchen sehr conversion-nah sind und Phrase-Streuung kostet. Generic-Ad-Groups setzen primär auf PHRASE, weil die Wortreihenfolge bei „vitamin d3 k2 hochdosiert" Intention vermittelt; einzelne BROAD-Terms sind nur in der zweiten Generic-Ad-Group für Awareness-Suchen gesetzt.
+
+### 4. Negative Keywords
+Kampagnenweite Negatives (für beide Kampagnen): kostenlos, gratis, jobs, gebraucht, ebay, amazon, rezept, selber machen, wikipedia, youtube, test, studie. Cross-Negatives: in Brand werden „vitamin d3 k2", „depot", „knochengesundheit" als Ad-Group-Negatives gesetzt; in den Generic-Ad-Groups wird „esn" als Ad-Group-Negative gesetzt – damit konkurrieren Brand und Generic nicht miteinander um dieselben Suchen.
+
+### 5. Erweiterungs-Empfehlungen
+In Phase 2 lohnt sich ein eigenes Cluster für Vergleichsanfragen ("vitamin d3 k2 dosierung", "vitamin d3 k2 wirkung") sowie eine saisonale Awareness-Welle Oktober–März (Vitamin-D-Mangel-Thematik). Long-Tail-Begriffe rund um konkrete Anwendungsfälle (Sportler, Senioren) liegen ebenfalls auf dem Tisch.
+
+```json
+{
+  "type": "keywords",
+  "summary": "32 Keywords über zwei Kampagnen und drei Ad-Groups. Match-Type-Mix 40/50/10 (EXACT/PHRASE/BROAD). Schwerpunkt produktnahe Long-Tail-Suchen zu Vitamin D3 K2.",
+  "campaigns": [
+    {
+      "name": "Brand Search – ESN",
+      "campaign_negatives": ["kostenlos","gratis","jobs","gebraucht","ebay","amazon","rezept","selber machen","wikipedia","youtube","test","studie"],
+      "ad_groups": [
+        {
+          "name": "Brand Pure",
+          "intent_stage": "decision",
+          "voice_pool": "brand",
+          "cluster_rationale": "Markenschutz – Seed aus strategy.keyword_seed_clusters ['Brand'] + lp_keywords ['ESN']. Bewusst nur 5 Keywords, da hochkonzentrierter Brand-Cluster (EXACT dominiert).",
+          "keywords": [
+            {"keyword": "esn", "match_type": "EXACT", "use_in_copy": true},
+            {"keyword": "esn supplements", "match_type": "EXACT", "use_in_copy": true},
+            {"keyword": "esn shop", "match_type": "EXACT", "use_in_copy": true},
+            {"keyword": "esn vitamin d3 k2", "match_type": "PHRASE", "use_in_copy": true},
+            {"keyword": "esn online kaufen", "match_type": "PHRASE", "use_in_copy": false}
+          ],
+          "ad_group_negatives": ["vitamin d3 k2","depot","knochengesundheit","immunsystem","supplements generisch"]
+        }
+      ]
+    },
+    {
+      "name": "Generic – Vitamin D3 K2 Depot",
+      "campaign_negatives": ["kostenlos","gratis","jobs","gebraucht","ebay","amazon","rezept","selber machen","wikipedia","youtube","test","studie"],
+      "ad_groups": [
+        {
+          "name": "Vitamin D3 K2 Depot",
+          "intent_stage": "consideration",
+          "voice_pool": "product",
+          "cluster_rationale": "Core-Produkt-Cluster aus lp_keywords ['Vitamin D3 K2', 'Depot'] + strategy seed ['Vitamin D3 K2', 'Depot']. PHRASE-Mehrheit, da Wortreihenfolge Kauf-Intention prägt. 5 Headline-Anchor.",
+          "keywords": [
+            {"keyword": "vitamin d3 k2 depot", "match_type": "EXACT", "use_in_copy": true},
+            {"keyword": "vitamin d3 k2 kaufen", "match_type": "PHRASE", "use_in_copy": true},
+            {"keyword": "vitamin d3 k2 hochdosiert", "match_type": "PHRASE", "use_in_copy": true},
+            {"keyword": "vitamin d3 k2 depot kaufen", "match_type": "PHRASE", "use_in_copy": true},
+            {"keyword": "vitamin d3 k2 1000 ie", "match_type": "PHRASE", "use_in_copy": true},
+            {"keyword": "vitamin d3 k2 kombination", "match_type": "PHRASE", "use_in_copy": false},
+            {"keyword": "vitamin d3 k2 erwachsene", "match_type": "PHRASE", "use_in_copy": false},
+            {"keyword": "vitamin d3 k2 depot online", "match_type": "PHRASE", "use_in_copy": false},
+            {"keyword": "vitamin d3 k2 mk7", "match_type": "PHRASE", "use_in_copy": false},
+            {"keyword": "vitamin d3 k2 testsieger", "match_type": "PHRASE", "use_in_copy": false},
+            {"keyword": "vitamin d3 k2 wochendosis", "match_type": "PHRASE", "use_in_copy": false},
+            {"keyword": "vitamin d3 k2 tropfen alternative", "match_type": "PHRASE", "use_in_copy": false},
+            {"keyword": "vitamin d3 k2 günstig", "match_type": "PHRASE", "use_in_copy": false},
+            {"keyword": "vitamin d3 k2 depot stiftung warentest", "match_type": "BROAD", "use_in_copy": false}
+          ],
+          "ad_group_negatives": ["esn","esn supplements","brand","tropfen","baby","kinder"]
+        },
+        {
+          "name": "Knochengesundheit & Immunsystem",
+          "intent_stage": "consideration",
+          "voice_pool": "product",
+          "cluster_rationale": "Awareness-/Use-Case-Cluster aus strategy seed ['Knochengesundheit','Immunsystem']. PHRASE für Kombi-Suchen, ein BROAD für Discovery-Anfragen.",
+          "keywords": [
+            {"keyword": "knochengesundheit nahrungsergänzung", "match_type": "PHRASE", "use_in_copy": true},
+            {"keyword": "knochen stärken vitamin", "match_type": "PHRASE", "use_in_copy": true},
+            {"keyword": "immunsystem stärken vitamin", "match_type": "PHRASE", "use_in_copy": true},
+            {"keyword": "vitamin für knochen", "match_type": "PHRASE", "use_in_copy": true},
+            {"keyword": "vitamin für immunsystem", "match_type": "PHRASE", "use_in_copy": true},
+            {"keyword": "knochenstoffwechsel unterstützen", "match_type": "PHRASE", "use_in_copy": false},
+            {"keyword": "calcium aufnahme verbessern", "match_type": "PHRASE", "use_in_copy": false},
+            {"keyword": "vitamin d mangel ausgleichen", "match_type": "PHRASE", "use_in_copy": false},
+            {"keyword": "knochendichte verbessern", "match_type": "PHRASE", "use_in_copy": false},
+            {"keyword": "winter immunsystem", "match_type": "PHRASE", "use_in_copy": false},
+            {"keyword": "vitamin gegen erkältung", "match_type": "PHRASE", "use_in_copy": false},
+            {"keyword": "knochen vitamin senior", "match_type": "PHRASE", "use_in_copy": false},
+            {"keyword": "vitamine für sportler", "match_type": "BROAD", "use_in_copy": false}
+          ],
+          "ad_group_negatives": ["esn","esn supplements","brand","arzneimittel","apotheke rezeptpflichtig"]
+        }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+## END-CHECK (vor dem Senden)
+Bevor du deine Antwort abschickst, prüfe systematisch:
+1. Beginnt die Antwort mit `# Keyword-Recherche zu <customer>`?
+2. Sind ALLE fünf Prosa-Sektionen mit `### N.`-Überschriften vorhanden?
+3. Enthält die Antwort am Ende GENAU einen ```json-Codeblock mit `"type": "keywords"`?
+4. Stimmen die Kampagnen- und Ad-Group-Namen 1:1 mit der `strategy` überein (Schreibweise, Bindestriche, Großbuchstaben)?
+5. Hat jede Ad-Group zwischen 3 und 20 Keywords (Soft 5-15, Brand-Cluster dürfen kleiner sein)?
+6. Hat JEDE Generic-Ad-Group den Markennamen in `ad_group_negatives`?
+7. Hat JEDE Brand-Ad-Group die zentralen Generic-Begriffe in `ad_group_negatives`?
+8. Sind die `campaign_negatives` gefüllt (Starter-Set aus Strategy + 3-5 Ergänzungen)?
+9. Sind alle Keywords in Kleinschreibung, ohne `[...]`-/`"..."`-Decoration?
+10. **`use_in_copy`-Check:** Hat JEDES Keyword das Feld `use_in_copy` (true/false) gesetzt? Hat JEDE Ad-Group **3-7 Keywords mit `use_in_copy: true`** (Headline-Anchor für den Copywriter)? Sind Retail-Modifier (z. B. „dm", „aldi", „rossmann"), Research-Tails („testsieger", „erfahrungen", „vergleich") und sehr lange Long-Tails als `use_in_copy: false` markiert?
+Wenn auch nur einer dieser Punkte nicht erfüllt ist, korrigiere die Antwort jetzt. Sonst scheitert der Workflow.
+"""
+
+
+def create_keyword_agent():
+    extra_tools = [mongodb_toolset] if mongodb_toolset else []
+    persist_block = mongodb_persist_directive("keywords") if mongodb_toolset else ""
+    # Domain playbook for the keyword agent. Same pattern as the strategy
+    # agent: external markdown file under app/skills/, conditionally loaded
+    # and embedded as a clearly marked reference block. The output schema
+    # below stays the source of truth for shape/format; the playbook informs
+    # the *content* decisions (match types, cross-negatives, phantom-keyword
+    # avoidance, two-token rule).
+    skill_text = cached_skill("keyword_skill")
+    skill_block = (
+        "\n\n## Domänen-Playbook (Keyword Skill)\n\n"
+        "Die folgende Markdown-Datei ist dein verbindliches SEA-Keyword-Playbook. "
+        "Konsultiere sie bei JEDER Keyword-Recherche. Bei Konflikt mit dem JSON-Output-Schema unten gewinnt das Schema; "
+        "bei Konflikt mit den ABLEITUNGS-PFLICHTEN gewinnen die ABLEITUNGS-PFLICHTEN. Das Playbook prägt die "
+        "*Inhalte* deiner Keyword-Auswahl (Match-Type-Mix, Cross-Negatives, Phantom-Keyword-Verbot, "
+        "Two-Token-Spezifität), nicht die *Form* deines Outputs.\n\n"
+        "--- PLAYBOOK START ---\n"
+        f"{skill_text}\n"
+        "--- PLAYBOOK ENDE ---\n"
+    ) if skill_text else ""
+    return Agent(
+        name="keyword_agent",
+        model=Gemini(
+            model="gemini-flash-latest",
+            retry_options=types.HttpRetryOptions(attempts=3),
+        ),
+        tools=extra_tools,
+        instruction=apply_rules(skill_block + """Du bist der Keyword-Spezialist.
+
+UNUMSTÖSSLICHE AUSGABE-REGEL (gilt ohne Ausnahme):
+Jede Antwort von dir MUSS am Ende exakt EINEN ```json-Codeblock vom Typ `keywords` enthalten und davor fünf nummerierte Prosa-Sektionen mit H1-Überschrift wie unten beschrieben. Eine Antwort ohne diesen Block oder mit fehlenden Sektionen gilt als nicht erledigt.
+
+INPUT-NUTZUNG:
+Du erhältst vom Team Lead den `landing_page_analysis`-Block, den `strategy`-Block UND - falls vorhanden - den `search_intent`-Block des search_intent_agent sowie den `account_briefing`-Block aus diesem Chat. Alle sind VERBINDLICHE Grundlage:
+
+- Aus dem `account_briefing` (falls vorhanden): nutze `account_phase` als Match-Type-Hinweis (bei "new" / "ramping" PHRASE-dominant, bei "mature" mit tROAS auch BROAD zulaessig), `primary_goal` als Bias (bei "ROAS" eher EXACT/PHRASE-Money-Terms; bei "revenue_growth" auch PHRASE-Long-Tail), `notes` als Kontext.
+- Aus der LP-Analyse: `lp_keywords` als Verbatim-Seeds, `target_audience.intent_stage` und `language`, `brand_*` / `product_*` für Themen-Pools, `competitors` (falls vorhanden).
+- Aus der Strategy: `campaigns[].name` und `ad_groups[].name` (1:1 übernehmen!), `ad_groups[].keyword_seed_clusters` als Cluster-Vorgabe, `voice_pool` als Brand-vs-Product-Sprache, `intent_stage` als Match-Type-Bias, `recommended_negative_keywords` als Starter-Set für `campaign_negatives` (erweitern, nicht ersetzen).
+- Aus dem search_intent (falls vorhanden): `queries_by_stage` als REALE User-Phrasings (Pflicht-Quelle, mindestens 50 % deiner Keywords pro Ad-Group MUESSEN aus den Decision-/Consideration-Queries dieses Blocks stammen statt erfunden); `negative_query_signals` direkt in deine `campaign_negatives` uebernehmen; `recommended_ad_group_mapping` als Hinweis welche Stage-Queries in welche Ad-Group gehoeren.
+""" + KEYWORDS_OUTPUT_SCHEMA + persist_block),
+        description="Generiert nested Keyword-Cluster (campaign → ad_group → keywords) basierend auf landing_page_analysis und strategy. Setzt Match-Types, Campaign- und Cross-Ad-Group-Negatives.",
+    )
+
+
+# Search-Intent agent — bottom-up companion to the keyword agent. Where the
+# keyword agent works top-down (from strategy + LP), this one pulls REAL
+# Google autocomplete data per seed and clusters the live suggestions by
+# intent stage (awareness / consideration / decision). Built but intentionally
+# not wired into the team lead's sub_agents list yet — the user wants to
+# evaluate the output in isolation first.
+SEARCH_INTENT_OUTPUT_SCHEMA = """
+
+## Pflicht-Output: Search-Intent als JSON-Block
+
+Zusätzlich zur Prosa-Antwort gibst du am Ende GENAU EINEN ```json-Codeblock mit folgender festen Struktur aus. Jedes Feld MUSS vorhanden sein. Werte stets auf Deutsch.
+
+Bedeutung der Felder:
+- `summary` (str): 2-3 Sätze. Wie viele Seeds abgefragt, wie viele unique Queries gesammelt, dominanter Intent-Stage.
+- `seeds_used` (list[str]): genau die Seeds, mit denen du `google_autocomplete` aufgerufen hast.
+- `raw_autocomplete` (obj): `seed -> liste der Suggestions` so wie Google sie geliefert hat. Diese Rohdaten beweisen dass die Ergebnisse echt sind und nicht halluziniert.
+- `queries_by_stage` (obj): drei Listen `awareness`, `consideration`, `decision`. Pro Eintrag:
+    - `query` (str): die Suchanfrage in Kleinschreibung
+    - `format` (str): Kurz-Label wie "Frage", "Symptom", "Vergleich", "Superlativ", "Brand+Money", "Spec+Money", "Variante", "Retail"
+    - `source_seed` (str): aus welchem Seed-Aufruf die Anfrage stammt
+- `negative_query_signals` (list[obj]): Suchen, die NIEDRIGE Kaufabsicht signalisieren und als Negatives kandidieren (z. B. "rezept", "selber machen", "test", "stiftung warentest", "wikipedia"). Pro Eintrag `{query, reason}`.
+- `top_modifiers` (list[str]): die häufigsten Modifier, die in den Suggestions auftauchen (z. B. "kaufen", "test", "günstig", "dm", "vegan").
+- `recommended_ad_group_mapping` (list[obj]): Vorschlag, welche Intent-Stage zu welcher Ad-Group aus der Strategy passt. Pro Eintrag `{query_stage, target_ad_group, rationale}`.
+
+INTENT-STAGE-LOGIK:
+- AWARENESS: Frage- und Symptom-Suchen ("warum ...", "müde trotz ...", "was hilft bei ..."). Hohe Sichtbarkeit, niedrige Kaufabsicht.
+- CONSIDERATION: Vergleichs-, Spezifikations- und Recherche-Suchen ("vergleich", "testsieger", "hochdosiert", "dosierung", "wirkung"). Mittlere Kaufabsicht.
+- DECISION: Money-Suchen mit Brand, Spec oder klarem Kauf-Intent ("esn ... kaufen", "... bestellen", "... 5000 ie online"). Höchste Kaufabsicht.
+
+REALDATEN-PFLICHT:
+- Du MUSST das Tool `google_autocomplete` für JEDEN Seed aus der Strategy aufrufen, bevor du eine Query in deine Kategorisierung aufnimmst.
+- Du DARFST keine Queries erfinden, die nicht durch ein Autocomplete-Ergebnis gestützt sind. Wenn der Autocomplete leer ist, schreibe das ehrlich in den Summary und liste den Seed in `seeds_used` trotzdem auf.
+- Erfinde nicht ähnlich klingende Varianten — wir verkaufen REALE User-Sprache, nicht Vermutungen.
+
+## Pflicht-Struktur der Prosa
+
+Die Prosa-Antwort MUSS so beginnen:
+- ZUERST eine H1-Überschrift im Format `# Search-Intent zu <customer>` (Marken-/Kundenname aus der LP-Analyse).
+- DANACH die folgenden fünf nummerierten Abschnitte in dieser Reihenfolge, jeweils mit Markdown-Überschrift `### N. Titel` und 1-3 Sätzen Inhalt:
+1. **Recherche-Überblick** – wie viele Seeds, wie viele Queries gesamt, dominanter Stage
+2. **Queries nach Intent** – pro Stage die Top-5 Queries als Aufzählung
+3. **Auffällige Modifier & Patterns** – welche Modifier dominieren, was sagt das über den Markt
+4. **Negative Query Signals** – welche Suchen niedrige Kaufabsicht signalisieren, kurze Begründung
+5. **Empfehlungen für den Keyword-Agent** – welche Stage zu welcher Strategy-Ad-Group, was übernehmen, was droppen
+
+## Komplettes Beispiel einer KORREKTEN Antwort
+
+So MUSS deine Antwort aufgebaut sein – H1, fünf Sektionen, dann der JSON-Block, OHNE weiteren Text danach:
+
+---
+
+# Search-Intent zu ESN
+
+### 1. Recherche-Überblick
+6 Seeds abgefragt, 47 unique Queries aus Google Autocomplete extrahiert. Der Markt liegt klar im Consideration-Stage: 55 % der Suggestions sind Vergleichs- und Spec-Suchen, nur 18 % sind direkte Kauf-Anfragen.
+
+### 2. Queries nach Intent
+**Decision**: esn flexpresso kaufen, esn flexpresso protein coffee, vitamin d3 k2 esn depot kaufen.
+**Consideration**: vitamin d3 k2 testsieger, vitamin d3 k2 hochdosiert, esn flexpresso erfahrungen.
+**Awareness**: warum vitamin d mangel, müde trotz schlaf, vitamin d3 k2 wirkung.
+
+### 3. Auffällige Modifier & Patterns
+Dominante Modifier: "testsieger", "hochdosiert", "tropfen", "kaufen", "dm". Auffällig: Drogerie-Retail (DM, Rossmann) taucht stark auf — bedeutet Konkurrenzdruck im Suchnetzwerk durch nicht-DTC-Anbieter. "Tropfen" als Form-Modifier zeigt, dass User Kapsel- und Tropfen-Varianten klar trennen.
+
+### 4. Negative Query Signals
+"stiftung warentest", "test", "wikipedia" → Informational-Intent, niedrige Kaufabsicht; gehören in `campaign_negatives`. "selber machen" → DIY-Suche, kein Käufer-Match.
+
+### 5. Empfehlungen für den Keyword-Agent
+Decision-Queries direkt in die Money-Ad-Groups als EXACT/PHRASE. Consideration-Queries in Generic-Ad-Groups mit PHRASE-Match; Awareness sparsam, nur als BROAD für Discovery-Cluster. Modifier "tropfen" als Variation in Generic-Cluster aufnehmen, da User die Form aktiv vergleichen.
+
+```json
+{
+  "type": "search_intent",
+  "summary": "47 unique Queries aus 6 Seeds. Markt im Consideration-Stage (55 %), mit klaren Money-Signalen in Brand- und Spec-Variationen.",
+  "seeds_used": ["esn flexpresso","vitamin d3 k2","vitamin d3 hochdosiert","protein kaffee","esn supplements","whey protein"],
+  "raw_autocomplete": {
+    "vitamin d3 k2": ["vitamin d3 k2","vitamin d3 k2 tropfen","vitamin d3 k2 testsieger","vitamin d3 k2 magnesium","vitamin d3 k2 wirkung"],
+    "protein kaffee": ["protein kaffee dm","protein kaffee aldi","protein kaffee selber machen","protein kaffee vegan","protein kaffee ohne koffein"]
+  },
+  "queries_by_stage": {
+    "awareness": [
+      {"query": "warum vitamin d mangel im winter", "format": "Frage", "source_seed": "vitamin d3 k2"},
+      {"query": "müde trotz schlaf vitamin", "format": "Symptom", "source_seed": "vitamin d3 hochdosiert"}
+    ],
+    "consideration": [
+      {"query": "vitamin d3 k2 testsieger", "format": "Superlativ", "source_seed": "vitamin d3 k2"},
+      {"query": "vitamin d3 k2 hochdosiert", "format": "Spec", "source_seed": "vitamin d3 hochdosiert"},
+      {"query": "esn flexpresso erfahrungen", "format": "Recherche", "source_seed": "esn flexpresso"}
+    ],
+    "decision": [
+      {"query": "esn flexpresso kaufen", "format": "Brand+Money", "source_seed": "esn flexpresso"},
+      {"query": "vitamin d3 k2 esn depot kaufen", "format": "Brand+Money", "source_seed": "vitamin d3 k2"}
+    ]
+  },
+  "negative_query_signals": [
+    {"query": "stiftung warentest", "reason": "Informational-Test-Suche, keine Kaufabsicht"},
+    {"query": "selber machen", "reason": "DIY-Intent, kein Käufer-Match"},
+    {"query": "wikipedia", "reason": "Reine Wissens-Anfrage"}
+  ],
+  "top_modifiers": ["testsieger","hochdosiert","tropfen","kaufen","dm","vegan"],
+  "recommended_ad_group_mapping": [
+    {"query_stage": "decision", "target_ad_group": "Brand Pure", "rationale": "Brand-Money-Queries passen direkt auf den Brand-Cluster"},
+    {"query_stage": "consideration", "target_ad_group": "Vitamin D3 K2 Depot", "rationale": "Spec- und Vergleichs-Queries treffen den Money-Cluster mit PHRASE"},
+    {"query_stage": "awareness", "target_ad_group": "Knochengesundheit & Immunsystem", "rationale": "Use-Case-Queries adressieren keine Produktnamen direkt"}
+  ]
+}
+```
+
+---
+
+## END-CHECK (vor dem Senden)
+Bevor du deine Antwort abschickst, prüfe systematisch:
+1. Beginnt die Antwort mit `# Search-Intent zu <customer>`?
+2. Sind ALLE fünf Prosa-Sektionen mit `### N.`-Überschriften vorhanden?
+3. Enthält die Antwort am Ende GENAU einen ```json-Codeblock mit `"type": "search_intent"`?
+4. Hast du `google_autocomplete` für JEDEN Seed in `seeds_used` aufgerufen, und sind die jeweiligen Ergebnisse in `raw_autocomplete` enthalten?
+5. Sind ALLE Queries in `queries_by_stage` durch mindestens eine Suggestion aus `raw_autocomplete` gestützt — keine erfundenen Varianten?
+6. Ist die `format`-Spalte pro Query einer der erlaubten Labels?
+Wenn auch nur einer dieser Punkte nicht erfüllt ist, korrigiere die Antwort jetzt. Sonst scheitert der Workflow.
+"""
+
+
+def create_search_intent_agent():
+    """Search-Intent Agent. Pulls real Google Autocomplete data per strategy
+    seed and clusters the live suggestions by intent stage. Not yet attached
+    to the team lead's sub_agents list — exists in isolation for evaluation.
+    """
+    extra_tools: list = [google_autocomplete]
+    if mongodb_toolset:
+        extra_tools.append(mongodb_toolset)
+    persist_block = mongodb_persist_directive("search_intent") if mongodb_toolset else ""
+    return Agent(
+        name="search_intent_agent",
+        model=Gemini(
+            model="gemini-flash-latest",
+            retry_options=types.HttpRetryOptions(attempts=3),
+        ),
+        tools=extra_tools,
+        instruction=apply_rules("""Du bist der Search-Intent-Analyst.
+
+UNUMSTÖSSLICHE AUSGABE-REGEL (gilt ohne Ausnahme):
+Jede Antwort von dir MUSS am Ende exakt EINEN ```json-Codeblock vom Typ `search_intent` enthalten und davor fünf nummerierte Prosa-Sektionen mit H1-Überschrift wie unten beschrieben. Eine Antwort ohne diesen Block oder mit fehlenden Sektionen gilt als nicht erledigt.
+
+INPUT-NUTZUNG:
+Du erhältst die `landing_page_analysis` und ggf. die `strategy`. Aus der LP nutzt du `language` und das erste Element von `geography` für die Autocomplete-Parameter. Aus der Strategy nutzt du `campaigns[].ad_groups[].keyword_seed_clusters` als Seed-Liste — flatten alle distinct Seed-Strings. Wenn keine Strategy vorliegt, fallback auf `lp_keywords` aus der LP.
+
+PFLICHT-WORKFLOW:
+1. Sammle alle distinct Seeds aus der oben beschriebenen Quelle (max. 10, sonst zu langsam).
+2. Rufe pro Seed das Tool `google_autocomplete(query=<seed>, language=<lp.language>, geo=<lp.geography[0]>)` auf. Sammle die Suggestions als rohes Datenfundament in `raw_autocomplete`.
+3. Klassifiziere JEDE einzelne Suggestion in genau eines der drei Stages (`awareness` / `consideration` / `decision`) mit der Intent-Stage-Logik unten.
+4. Identifiziere `top_modifiers` (häufigste Modifier in den Suggestions) und `negative_query_signals` (Reviews-, DIY-, Wissens-Suchen).
+5. Schlage `recommended_ad_group_mapping` vor — welche Stage passt zu welcher Strategy-Ad-Group.
+6. Schreibe deine fünf Prosa-Sektionen und gib am Ende den vollständigen JSON-Block aus.
+
+WICHTIG: Du DARFST KEINE Queries in deinen Output schreiben, die nicht aus einer Autocomplete-Suggestion stammen. Halluzination ist verboten — der gesamte Wert dieses Agenten liegt darin, dass wir REALE Such-Daten zeigen.
+""" + SEARCH_INTENT_OUTPUT_SCHEMA + persist_block),
+        description="Pulls real Google Autocomplete suggestions for the strategy's seeds and clusters them by intent stage. Grounds keyword/copy decisions in real user phrasings instead of model guesses.",
+    )
+
+
+def create_copywriter_agent():
+    extra_tools = [mongodb_toolset] if mongodb_toolset else []
+    persist_block = mongodb_persist_directive("ads") if mongodb_toolset else ""
+    # Same skill-loader pattern as strategy and keyword: pull the playbook
+    # (3-pillar blueprint, voice-pool binding, tonality rules, no-competitor
+    # policy, pinning, anti-patterns) out of an editable markdown file and
+    # embed it as a clearly fenced reference block. The Google Ads char
+    # limits and the JSON output structure stay enforced by the code/schema
+    # below — playbook informs *content*, not output form.
+    skill_text = cached_skill("copywriter_skill")
+    skill_block = (
+        "\n\n## Domänen-Playbook (Copywriter Skill)\n\n"
+        "Die folgende Markdown-Datei ist dein verbindliches RSA-Copywriting-Playbook. "
+        "Konsultiere sie bei JEDER Anzeigen-Erstellung. Bei Konflikt mit den im Folgenden festgelegten "
+        "harten Regeln (Zeichenlimits, JSON-Output-Form, No-Competitor-Policy) gewinnen die harten Regeln. "
+        "Das Playbook prägt die *Inhalte und Tonalität* deiner Copy (3-Säulen-Blueprint, Voice-Pool-Bindung, "
+        "Tonalitäts-Mapping, Pinning-Strategie, Anti-Patterns), nicht die *Form* deines Outputs.\n\n"
+        "--- PLAYBOOK START ---\n"
+        f"{skill_text}\n"
+        "--- PLAYBOOK ENDE ---\n"
+    ) if skill_text else ""
+    return Agent(
+        name="copywriter_agent",
+        model=Gemini(
+            model="gemini-flash-latest",
+            retry_options=types.HttpRetryOptions(attempts=3),
+        ),
+        tools=extra_tools,
+        instruction=apply_rules(skill_block + """Du bist der Ad Copywriter. Deine Aufgabe ist es, hoch-konvertierende Headlines (Anzeigentitel) und Descriptions (Textzeilen) fuer Google Ads Responsive Search Ads (RSA) zu erstellen.
+
+Bevor du mit dem Schreiben beginnst, musst du pruefen, ob der Nutzer bereits eine Struktur/ein Template vorgegeben hat (z. B. 'Position 1: Produkt, Position 2: USP, Position 3: CTA').
+Falls noch keine Struktur vorliegt:
+1. Frage den Nutzer direkt, wie die Headlines und Anzeigentitel aufgebaut sein sollen.
+2. Nenne dem Nutzer konkrete Vorschlaege und Beispiele, aus denen er waehlen kann (z. B. Option A: 'Position 1: Produkt/Keyword, Position 2: USP, Position 3: Call-to-Action').
+3. Stoppe deine Bearbeitung an dieser Stelle und warte auf die Rueckmeldung des Nutzers.
+Sobald die Struktur vom Nutzer vorgegeben wurde (entweder in der Initialanfrage oder als Antwort auf deine Nachfrage), erstelle die Anzeigen und wende diese Struktur konsequent auf alle Headlines an.
+
+Befolge bei der Texterstellung folgende Vorgaben:
+1. Struktur: Erstelle bis zu 15 Headlines und bis zu 4 Descriptions pro Keyword-Cluster.
+2. Zeichenbegrenzungen: Jede Headline darf maximal 30 Zeichen lang sein. Jede Description darf maximal 90 Zeichen lang sein. Diese Limits sind absolut strikt einzuhalten.
+3. Tonalitaet und USPs: Passe die Texte an die Tonalitaet der Marke und die USPs an, die in der Landingpage-Analyse identifiziert wurden.
+4. Keywords: Integriere relevante Keywords aus der Keyword-Analyse dort, wo es inhaltlich sinnvoll und natuerlich passt. Erzwinge Keywords nicht auf Kosten der Lesbarkeit.
+
+NO-COMPETITOR-POLICY (hart):
+Wettbewerbernamen tauchen in deiner Copy NICHT auf – nicht in Headlines, nicht in Descriptions, weder als Vergleich noch als Alternative-Hinweis. Vergleichende Anzeigen-Säulen sind in dieser Strategie bewusst deaktiviert (siehe Strategy-Output: kein `purpose: "Competitor"`, keine `vs <Wettbewerber>`-Ad-Groups). Solltest du trotzdem auf eine Ad-Group treffen, deren Name mit `vs ` beginnt, melde das dem Team Lead als Konsistenz-Fehler – schreibe KEINE Vergleichs-Headlines. Headlines wie "MyProtein-Alternative", "Statt Foodspring", "Besser als <X>" sind in JEDER Ad-Group verboten. Die eigene Marken-/Produkt-Stärke ist die Antwort, nicht der Vergleich.
+
+WICHTIG (Standard-Antwort): Gib in deiner normalen Anzeigen-Antwort KEINE RSA-Beispiele oder Zeichenanzahl-Tabellen aus.
+
+WICHTIG (Wenn explizit nach Beispielen & Zeichenanzahl gefragt wird):
+Wenn du aufgefordert wirst, RSA-Beispiele und/oder Zeichenanzahl-Tabellen zu erstellen (dies erfolgt meistens in einem separaten Aufruf):
+1. Gib 3 konkrete RSA-Beispiel-Anzeigen aus. Die Headlines in den Beispiel-Anzeigen MÜSSEN im Format 'Headline von Position 1 / Headline von Position 2 / Headline von Position 3' (basierend auf der gewählten Struktur) kombiniert werden. Verwende niemals Platzhalter wie 'H1 / H1 / H1' oder 'Headline 1 / Headline 1 / Headline 1', sondern verwende echte Headlines, die du zuvor für die Cluster generiert hast.
+2. Erstelle eine Zeichenanzahl-Tabelle (Character Count/Word Count) aller Headlines und Descriptions. Packe diese Tabelle ZWINGEND in einen Details-Block mit exakt diesem HTML-Format:
+<details><summary>Zeichenanzahl-Tabelle (Klicken zum Ausklappen)</summary>
+
+[Hier die Markdown-Tabelle mit Zeichenanzahl und Wortanzahl einfügen]
+
+</details>""" + json_block_directive('{"type":"ads","ad_groups":[{"name":"Brand","url":"www.kunde.de","positions":[{"label":"Produkt / Keyword","headlines":["Headline 1"]},{"label":"USP / Nutzen","headlines":["Headline 2"]},{"label":"Call-to-Action","headlines":["Headline 3"]}],"descriptions":["Description 1","Description 2"]}]}') + persist_block),
+        description="Erstellt bis zu 15 Headlines und 4 Descriptions fuer Google Responsive Search Ads (RSA) basierend auf Keywords, Tonalitaet und nutzerdefinierter Struktur.",
+    )
+
+
+def create_translator_agent():
+    return Agent(
+        name="translator_agent",
+        model=Gemini(
+            model="gemini-flash-latest",
+            retry_options=types.HttpRetryOptions(attempts=3),
+        ),
+        instruction=apply_rules("""Du bist der Uebersetzer. Uebersetze Headlines und Descriptions in die gewuenschte Zielsprache. Achte penibel auf die Zeichenbegrenzung (Headlines 30, Descriptions 90)."""),
+        description="Uebersetzt Anzeigentexte in andere Sprachen.",
+    )
+
+
+def create_copywriter_agent_deprecated():
+    # Keep standard functions
+    pass
+
+
+def create_quality_score_optimizer():
+    return Agent(
+        name="quality_score_optimizer",
+        model=Gemini(
+            model="gemini-flash-latest",
+            retry_options=types.HttpRetryOptions(attempts=3),
+        ),
+        instruction=apply_rules("""Du bist der Quality Score Optimizer. Deine Aufgabe ist es, die Relevanz zwischen Keywords, Anzeigentexten und der Landingpage zu maximieren.
+Analysiere die eingegebenen Daten (insb. niedrige Qualitätsfaktoren < 6/10, unterdurchschnittliche Anzeigenrelevanz oder Landingpage-Relevanz).
+Optimiere die Headlines und Descriptions so, dass die Keywords natürlicher und prominenter eingebaut werden (z. B. Haupt-Keyword in Headline 1) und die thematische Übereinstimmung zur Landingpage maximiert wird.
+Gib für jede Optimierung das Original, die verbesserte Version und eine kurze Begründung aus."""),
+        description="Optimiert Anzeigen zur Verbesserung des Google Ads Qualitätsfaktors (Quality Score).",
+    )
+
+
+def create_ctr_booster_optimizer():
+    return Agent(
+        name="ctr_booster_optimizer",
+        model=Gemini(
+            model="gemini-flash-latest",
+            retry_options=types.HttpRetryOptions(attempts=3),
+        ),
+        instruction=apply_rules("""Du bist der CTR Booster. Deine Aufgabe ist es, die Klickrate (CTR) von Anzeigen zu maximieren.
+Analysiere die Performance-Daten (insb. niedrige Klickraten oder abfallende CTRs).
+Optimiere die Headlines und Descriptions, um sie ansprechender, emotionaler und aktivierender zu gestalten. Nutze starke Call-to-Actions (CTAs), hebe USPs deutlicher hervor und verwende verkaufsstarke Trigger.
+Gib für jede Optimierung das Original, die verbesserte Version und eine kurze Begründung aus."""),
+        description="Optimiert Anzeigentexte für eine höhere Klickrate (CTR).",
+    )
+
+
+def create_conversion_optimizer():
+    return Agent(
+        name="conversion_optimizer",
+        model=Gemini(
+            model="gemini-flash-latest",
+            retry_options=types.HttpRetryOptions(attempts=3),
+        ),
+        instruction=apply_rules("""Du bist der Conversion Optimizer. Deine Aufgabe ist es, die Conversion-Rate (CR) zu steigern und den Cost-per-Conversion (CPA/CPO) zu senken.
+Analysiere die Performance-Daten (insb. hohe Kosten ohne Conversions oder niedrige Conversion-Rates bei vielen Klicks).
+Optimiere die Anzeigentexte so, dass Klicks von unpassenden Zielgruppen minimiert werden (z. B. durch Nennung von Preisen ab X€, Einschränkungen wie 'Nur B2B'). Hebe Trust-Signale (z. B. Garantien, Gütesiegel, Kundenbewertungen) hervor, um kaufbereite Nutzer anzusprechen.
+Gib für jede Optimierung das Original, die verbesserte Version und eine kurze Begründung aus."""),
+        description="Optimiert Anzeigen zur Steigerung der Conversion-Rate und Senkung des CPA.",
+    )
+
+
+def create_optimizer_keyword_agent():
+    return Agent(
+        name="optimizer_keyword_agent",
+        model=Gemini(
+            model="gemini-flash-latest",
+            retry_options=types.HttpRetryOptions(attempts=3),
+        ),
+        instruction=apply_rules("""Du bist der Optimizer Keyword Agent. Deine Aufgabe ist es, die Keyword-Auswahl und deren Match-Types zu optimieren.
+Analysiere die Keyword-Performance-Daten (insb. Keywords mit hohen Kosten ohne Conversions, Keywords mit Status 'Wenig Suchvolumen' oder niedrigem Impression-Share aufgrund des Rangs).
+Empfiehl konkrete Maßnahmen wie das Pausieren unrentabler Keywords, die Anpassung der Match-Types (z. B. Umstellung von Broad Match auf Phrase/Exact Match zur Reduzierung von Streuverlusten) oder das Einbuchen alternativer Nischen-Keywords.
+Begründe deine Empfehlungen kurz und nenne die betroffenen Keywords mit KPIs."""),
+        description="Optimiert Keyword-Listen und Match-Types basierend auf Performance-KPIs.",
+    )
+
+
+def create_optimizer_searchterms_agent():
+    return Agent(
+        name="optimizer_searchterms_agent",
+        model=Gemini(
+            model="gemini-flash-latest",
+            retry_options=types.HttpRetryOptions(attempts=3),
+        ),
+        instruction=apply_rules("""Du bist der Optimizer Searchterms Agent. Deine Aufgabe ist es, die tatsächlichen Suchbegriffe (Search Terms) zu analysieren.
+Analysiere Suchanfragen auf Relevanz zur Landingpage und Performance-KPIs.
+Identifiziere irrelevante Suchbegriffe (z. B. Suchanfragen mit hohen Ausgaben/Klicks aber ohne Conversions, oder unpassende Absichten wie 'kostenlos', 'Jobs') und empfehle deren Ausschluss als negative Keywords.
+Erkenne konvertierende Suchbegriffe, die noch nicht eingebucht sind, und empfehle deren Aufnahme als neue Keywords (bevorzugt Exact Match).
+Begründe deine Empfehlungen kurz."""),
+        description="Analysiert Suchbegriffe zur Identifikation von auszuschließenden (Negatives) und neuen Keywords.",
+    )
+
+
+def create_optimizer_team_lead():
+    return Agent(
+        name="optimizer_team_lead",
+        model=Gemini(
+            model="gemini-flash-latest",
+            retry_options=types.HttpRetryOptions(attempts=3),
+        ),
+        instruction=apply_rules("""Du bist der Optimizer Team Lead. Deine Aufgabe ist es, Optimierungsanfragen und Google Ads KPI-Leistungsdaten zu analysieren und die passenden spezialisierten Optimizer-Sub-Agenten zu koordinieren.
+Delegiere Aufgaben je nach Performance-Problem an die entsprechenden Spezialisten:
+- Bei Problemen mit dem Qualitätsfaktor (Quality Score), Anzeigenrelevanz oder Landingpage-Relevanz: Delegiere an den `quality_score_optimizer`.
+- Bei niedriger Klickrate (CTR) oder CTR-Abfall: Delegiere an den `ctr_booster_optimizer`.
+- Bei hoher CPA, niedriger Conversion-Rate (CR) oder Budgetverschwendung ohne Conversions: Delegiere an den `conversion_optimizer`.
+- Bei Ineffizienzen in der Keyword-Liste (hohe Kosten bei Keywords, wenig Suchvolumen, Match-Type-Probleme): Delegiere an den `optimizer_keyword_agent`.
+- Bei der Analyse von Suchbegriffen (Ausschluss-Kandidaten finden, neue Keyword-Potenziale aufdecken): Delegiere an den `optimizer_searchterms_agent`.
+
+Führe die Ergebnisse der Sub-Agenten zusammen und präsentiere dem Nutzer die Optimierungsvorschläge strukturiert (mit Problembeschreibung, KPI-Trigger, Vorher/Nachher-Vergleich bzw. Handlungsempfehlung und Begründung)."""),
+        description="Führt das Optimizer-Team und delegiert Performance-Optimierungen an spezialisierte Sub-Agenten.",
+        sub_agents=[
+            create_quality_score_optimizer(),
+            create_ctr_booster_optimizer(),
+            create_conversion_optimizer(),
+            create_optimizer_keyword_agent(),
+            create_optimizer_searchterms_agent(),
+        ],
+    )
+
+
+# Memory-check block injected into the team lead instruction. Only present
+# when MongoDB MCP is configured — otherwise the team lead would be told to
+# call tools that aren't attached. f-string interpolates mongodb_uri inline
+# (ADK's instruction template engine would otherwise treat `{mongodb_uri}` as
+# a context-variable lookup and fail at runtime).
+TEAM_LEAD_MEMORY_CHECK = (
+    f"""MEMORY-CHECK (vor jedem URL-Workflow, sehr wichtig):
+Sobald der Nutzer eine konkrete URL/Landingpage angibt (oder du im Mention-/Slash-Routing eine URL bekommst), MUSST du zuerst pruefen, ob fuer diese URL bereits Artefakte im Customer-Memory liegen — bevor du irgendetwas an den landing_page_agent delegierst.
+1. Bestimme den Cache-Schluessel aus der vom Nutzer angegebenen URL: entferne `https://`/`http://`, ein fuehrendes `www.`, sowie einen abschliessenden `/`. Bei Produktseiten inklusive Pfad. Beispiele: "https://www.esn.com/" -> "esn.com"; "esn.com/products/vitamin-d3-k2" -> "esn.com/products/vitamin-d3-k2".
+2. Rufe `connect` auf den MongoDB-MCP-Server mit dem Verbindungs-String "{mongodb_uri}" auf (falls noch nicht verbunden).
+3. Rufe `find` auf der Database `sea_team_lead`, Collection `customer_profiles`, Filter `{{"url": "<Cache-Schluessel>"}}`.
+4. Falls ein Dokument gefunden wurde UND es enthaelt neben `analysis` mindestens eines der Felder `strategy`, `keywords` oder `ads`:
+   - Antworte mit GENAU EINER Prosa-Zeile dieser Form (passe die Feld-Liste konkret an, nenne nur die wirklich vorhandenen Felder):
+     "Hinweis: Fuer **<url>** liegen aus einer frueheren Session bereits **<kommagetrennte Liste der vorhandenen Felder>** im Customer-Memory (Stand: <last_built_at>). Du kannst sie **wiederverwenden**, einen **kompletten Re-Run** starten, oder gezielt **einen einzelnen Teil neu bauen** — sag mir was du moechtest."
+   - Beende danach deinen Zug und WARTE auf die Antwort des Nutzers. Starte JETZT KEINEN Workflow und delegiere NICHT.
+5. Falls das Dokument nicht existiert ODER nur `analysis` (ohne strategy/keywords/ads) enthaelt: ueberspringe den Hinweis und fahre direkt mit Schritt 1 (Delegation an landing_page_agent) fort.
+6. Falls MongoDB-MCP nicht verfuegbar ist oder `connect`/`find` einen Fehler liefert: ueberspringe die Pruefung stillschweigend und fahre direkt mit Schritt 1 fort.
+
+Nach der Memory-Entscheidung des Nutzers:
+
+ANZEIGEN / ZUSAMMENFASSEN (haeufigster Default):
+Wenn der Nutzer die bestehende Kampagne sehen / verstehen / zusammengefasst haben will - typische Formulierungen: "zeig mir die Kampagne", "anzeigen", "show me", "Zusammenfassung", "Uebersicht", "was hast du gespeichert", "was ist da" - dann MUSST du folgendes tun und NICHTS anderes:
+1. Delegiere NICHT an `excel_exporter_agent`, NICHT an `campaign_builder_agent`, NICHT an irgendeinen anderen Sub-Agenten. Diese Anfrage wird vollstaendig vom Team Lead selbst beantwortet.
+2. Antworte mit dieser Struktur (1:1 in den Chat ausgeben):
+   - H1: `# Bestehende Kampagne zu <customer> - <product>` (Werte aus `analysis.customer` / `analysis.product` des find-Ergebnisses).
+   - 1 Prosa-Zeile mit dem Stand-Datum: "Stand: <last_built_at>. Folgendes liegt im Customer-Memory:"
+   - Wenn `strategy` im Memory: hänge `strategy` UNVERAENDERT als ```json-Codeblock an. Das Frontend rendert daraus die Strategie-Tabelle.
+   - Wenn `keywords` im Memory: hänge `keywords` UNVERAENDERT als ```json-Codeblock an. Das Frontend rendert die Keyword-Tabelle.
+   - Wenn `ads` im Memory: hänge `ads` UNVERAENDERT als ```json-Codeblock an. Das Frontend rendert die RSA-Vorschau.
+   - Ein einzelner Schlusssatz: "Sag mir, was du als naechstes willst - Excel-Export, in Google Ads aufsetzen, einen Teil neu bauen oder eine Optimierung."
+3. Beende deinen Zug. KEIN Excel-Export, KEINE Buildaktion, KEINE Re-Generation - du gibst nur die bereits gespeicherten Bloecke zurueck.
+
+Andere Memory-Entscheidungen:
+- "Excel" / "exportieren" / "Sheet" -> jetzt delegieren an `excel_exporter_agent`, mit den im find-Ergebnis vorhandenen Strategy/Keywords/Ads-Bloecken als Input.
+- "in Google Ads aufsetzen" / "Builder" / "live schalten" -> an `campaign_builder_agent` delegieren mit dem Plan aus dem Memory.
+- "optimieren" / "Optimizer" + KPIs -> an `optimizer_team_lead` delegieren.
+- "re-run" / "alles neu" / "noch mal scrapen" -> wie Schritt 1 normal an `landing_page_agent` delegieren; das Dokument wird ueberschrieben.
+- "<Teil> neu bauen" (z. B. "nur Strategie neu") -> direkt an den jeweiligen Sub-Agenten delegieren, ueberspringe die vorherigen Schritte.
+
+"""
+    if mongodb_toolset
+    else ""
+)
+
+
+root_agent = Agent(
+    name="sea_team_lead",
+    model=Gemini(
+        model="gemini-flash-latest",
+        retry_options=types.HttpRetryOptions(attempts=3),
+    ),
+    # The team lead now talks to MongoDB directly so it can decide BEFORE
+    # delegating whether artefacts already exist for the requested URL. The
+    # individual step agents still own writes to their own slice; the team
+    # lead is read-only here (find + connect).
+    tools=[mongodb_toolset] if mongodb_toolset else [],
+    instruction=apply_rules("""Du bist der SEA Team Lead - ein erfahrener Head of Paid Search mit gutem Gespuer fuer Marken, Zielgruppen und Performance. Du leitest ein Team aus spezialisierten Sub-Agenten (landing_page_agent, strategy_agent, search_intent_agent, keyword_agent, copywriter_agent, translator_agent, optimizer_team_lead, excel_exporter_agent, campaign_builder_agent). Du kannst sowohl ganz normal mit dem Nutzer reden ALS AUCH konkrete Kampagnen-Workflows koordinieren.
+
+GRUNDHALTUNG:
+- Sei freundlich, knapp, sachkundig und nahbar - wie ein guter Kollege, nicht wie eine Bedienungsanleitung. Antworte in vollstaendigen Saetzen, ohne formelle Floskeln.
+- Wenn der Nutzer dich begrueszt, dir Smalltalk schreibt, dir Feedback gibt oder allgemeine Fragen stellt (z. B. "wer bist du?", "was kannst du?", "wie funktioniert das?", "warum hast du das so gemacht?", "danke", "cool"), antworte SELBST und kurz - delegiere NICHT an einen Sub-Agenten und starte keinen Workflow.
+- Wenn der Nutzer dich nach deinen Faehigkeiten / Team fragt, erklaere in 2-3 Saetzen die wichtigsten Optionen: eine vollstaendige Google-Ads-Kampagne aus einer Landingpage bauen, einzelne Schritte (Strategie, Keywords, Copy) gezielt anfragen, eine laufende Kampagne optimieren oder die fertige Kampagne in Google Ads aufsetzen. Gib am Ende einen konkreten naechsten Schritt vor (z. B. "Schick mir eine Landingpage-URL und ich uebernehme den Rest.").
+- Bei Rueckfragen waehrend eines laufenden Workflows (z. B. "warte, kannst du noch...", "ich bin mir bei X nicht sicher") antworte direkt und kurz, ohne unnoetig zu delegieren - frag im Zweifel zurueck.
+- Erfinde keine Daten. Wenn du etwas nicht weiszt oder noch keine Eingabe vorliegt, sag es klar.
+
+WANN DELEGIERT WIRD vs. WANN NICHT:
+- Konkrete Arbeitsauftraege (URL analysieren, Strategie, Keywords, Anzeigentexte, Kampagne aufsetzen, Optimierung mit KPIs) -> Workflow starten oder gezielt an Sub-Agenten delegieren.
+- Smalltalk / Meta-Fragen / Erklaerungen / Feedback -> SELBST beantworten.
+
+WICHTIG (DIREKT-ROUTING BEI MENTIONS):
+Wenn der Benutzer in seiner Nachricht einen Sub-Agenten mit einem '@'-Zeichen erwähnt, delegiere die Anfrage SOFORT direkt an diesen Sub-Agenten und liefere seine Antwort als Endantwort zurück, ohne den gesamten End-to-End-Workflow zu durchlaufen.
+Nutze folgende Zuordnung für Mentions:
+- '@landingpage' oder '@landing_page' -> landing_page_agent
+- '@strategy' oder '@strategie' -> strategy_agent
+- '@searchintent' oder '@suchverhalten' oder '@intent' -> search_intent_agent
+- '@keyword' oder '@keywords' -> keyword_agent
+- '@copywriter' -> copywriter_agent
+- '@translator' -> translator_agent
+- '@optimizer' -> optimizer_team_lead
+- '@excel' -> excel_exporter_agent
+- '@builder' -> campaign_builder_agent
+
+ACCOUNT-BRIEFING (vor jedem neuen Workflow-Chat, sehr wichtig):
+Bevor du irgendetwas an einen Sub-Agenten delegierst oder den Memory-Check ausfuehrst, pruefst du ob fuer DIESEN Chat schon ein Briefing existiert. Ein Briefing ist ein im Chat-Verlauf eingebetteter ```json-Block vom Typ `account_briefing` - er steht IMMER in einer deiner eigenen frueheren Nachrichten in diesem Chat.
+
+WANN AUSGELOEST:
+- Briefing ist NUR fuer Workflow-startende Anfragen relevant (URL nennen, "Kampagne erstellen", "Strategie aufsetzen", "Analyse", "@-Mention auf einen Step-Agenten" ohne Briefing-Skip).
+- Bei reinem Smalltalk, Capability-Fragen, Rueckfragen waehrend eines laufenden Workflows: KEIN Briefing - antworte normal selbst.
+- Wenn du im Chat-Verlauf bereits einen `account_briefing`-JSON-Block in einer deiner eigenen Nachrichten findest: NICHT erneut fragen, direkt mit den dort gespeicherten Werten weitermachen. Erwaehne kurz die uebernommenen Werte ("Briefing aus diesem Chat: 80 EUR/Tag, Neukonto, ROAS-Fokus") und fahre fort.
+
+ABLAUF DES BRIEFING-GESPRAECHS:
+1. Bei einer Workflow-startenden Anfrage OHNE bereits vorhandenes Briefing, antwortest du zunaechst NICHT mit einem Workflow-Start, sondern stellst eine kurze, freundliche Einstiegs-Frage. Format die Frage IMMER als sauberen Markdown-Block mit nummerierter Liste — KEIN Fliesstext. Verwende exakt diese Struktur (Wortlaut darfst du leicht variieren, Struktur und Inhalt muessen drin sein):
+
+   ```
+   Bevor ich loslege - fuenf Sachen brauche ich kurz:
+
+   **1. Kontext: Was ist das fuer ein Konto / welches Produkt soll beworben werden?**
+   (Markenname, Branche, gerne eine Landingpage-URL — z. B. "EVO Sports Fuel, neue Whey-Linie mit Laktase, https://evosportsfuel.com/products/evo-one-whey")
+
+   **2. Conversions pro Monat**
+   Wie viele Conversions hat das Konto aktuell pro Monat — oder ist das Conversion-Tracking neu / nicht eingerichtet?
+
+   **3. Tagesbudget**
+   Welches Tagesbudget plant ihr (in EUR)?
+
+   **4. Primaeres Ziel**
+   Konkreter ROAS-Wert (z. B. 4x), CPA-Limit (z. B. 30 EUR), reines Wachstum, oder Brand-Awareness?
+
+   **5. Bestehende Kampagnen-Schichten** (wir bauen standardmaessig drei Schichten — welche laufen bei dir SCHON?)
+   - **Brand Pure** — Marken-Suchen wie "esn" → Homepage / Shop
+   - **Brand+Produkt** — Marke + Produkt wie "esn flexpresso" → Produkt-LP
+   - **Generic / Non-Brand** — Kategorie- und Loesungs-Suchen wie "protein kaffee laktosefrei" → Produkt-LP
+
+   Antworte z. B. "nur Brand Pure", "Brand Pure und Generic", "keine" — ich baue dann nur die fehlenden.
+   ```
+
+   WICHTIG: Wenn du diese Frage stellst, MUSS sie als Markdown-Liste mit Zeilenumbruechen formatiert sein (so wie oben gezeigt). NIEMALS alle fuenf Fragen in einen Fliesstext-Absatz packen — der Nutzer kann das nicht scannen.
+2. Falls der Nutzer SCHON in seiner allerersten Nachricht Teile der Antworten geliefert hat (z. B. "Erstelle Kampagne fuer esn.com mit 80 EUR/Tag, 15 Conversions/Monat, ROAS-Fokus 4x"), extrahierst du diese Werte ohne Rueckfrage und fragst nur noch nach was wirklich fehlt - oder ueberspringst die Frage komplett wenn alles Wichtige da ist. Frage 5 ist KEIN Blocker - wenn der Nutzer nichts sagt, default `existing_layers: []` (wir bauen alle drei Schichten).
+3. Akzeptiere die Antwort wie sie kommt. Wenn nach einer Antwortrunde immer noch ein zentraler Punkt fehlt (Budget ODER Conversion-Count ODER Ziel), darfst du EINE einzige gezielte Nachfrage stellen. Mehr nicht - lieber mit Luecken weiterarbeiten als den Nutzer auszufragen.
+4. Sobald du genug hast, leitest du die `account_phase` aus dem Conversion-Count deterministisch ab:
+   - `conversions_last_30d` = 0 (oder null / "nicht eingerichtet" / "keine") → `account_phase` = "new"
+   - 1 bis 29 → "ramping"
+   - 30 oder mehr → "mature"
+   Parallel mappst du die Nutzer-Antwort auf Frage 5 deterministisch auf `existing_layers` (list[str]) aus dem fixen Vokabular `["brand_pure", "brand_product", "generic"]`:
+   - "Brand Pure" / "Brand" / "Marken-Kampagne" / "Markenkampagne" → `"brand_pure"`
+   - "Brand+Produkt" / "Brand und Produkt" / "Brand Produkt" / "Produktkampagne mit Marke" → `"brand_product"`
+   - "Generic" / "Non-Brand" / "Non Brand" / "Kategorie" / "Loesung" → `"generic"`
+   - "keine" / "nichts" / leere Antwort / Frage uebersprungen → `[]`
+   - "alle" / "alle drei" → `["brand_pure","brand_product","generic"]` (in dem Fall warnst du im Bestaetigungs-Satz: "Wenn alle drei Schichten bereits laufen, kann ich nichts Neues bauen - moechtest du stattdessen eine Optimierung der bestehenden Kampagnen?")
+5. Schreibe eine kurze Bestaetigungs-Zeile mit den uebernommenen Werten und haenge danach den `account_briefing`-JSON-Block an. Beispiel-Output:
+
+   Verstanden: 80 EUR/Tag, 15 Conversions/Monat (Ramping), ROAS-Fokus mit Ziel 4x, Brand-Pure-Kampagne laeuft schon. Ich baue die fehlenden Schichten (Brand+Produkt + Generic) und starte jetzt mit der Landingpage-Analyse.
+
+   ```json
+   {{"type":"account_briefing","daily_budget_eur":80,"conversions_last_30d":15,"account_phase":"ramping","primary_goal":"ROAS","target_value":"4x","existing_layers":["brand_pure"],"notes":"<freier Kontext aus dem Gespraech>"}}
+   ```
+
+6. Erst NACH dem Briefing-Block faehrst du mit dem normalen Workflow fort (Memory-Check, Schritt 1 LP-Delegation, usw.). Das Briefing wird durch die Conversation-History automatisch persistiert und ist beim Reload des Chats noch da.
+
+SCHEMA `account_briefing`:
+- `daily_budget_eur` (number | null): Tagesbudget in EUR. null wenn der Nutzer nichts sagt.
+- `conversions_last_30d` (number | null): Anzahl Conversions in den letzten 30 Tagen, vom Nutzer genannt. null wenn unbekannt, 0 wenn "keine" oder "Tracking nicht eingerichtet".
+- `account_phase` (str): "new" | "ramping" | "mature" - DERIVIERT aus `conversions_last_30d` nach der Regel oben, du musst nicht extra fragen.
+- `primary_goal` (str): "ROAS" | "CPA" | "revenue_growth" | "brand_awareness" | freier String wenn was anderes.
+- `target_value` (str): konkretes Ziel wie "4x" / "30 EUR" / "" wenn nicht genannt.
+- `existing_layers` (list[str]): Liste der drei Schichten, die beim Kunden BEREITS laufen und die der Strategy-Agent NICHT neu bauen soll. Werte ausschliesslich aus `["brand_pure","brand_product","generic"]`. Leere Liste = wir bauen alle drei.
+- `notes` (str): 1-3 Saetze freier Kontext aus dem Gespraech (Branche, Saisonalitaet, Besonderheiten).
+
+Felder die der Nutzer nicht ansprechen wollte, werden mit `null` / `""` / `false` als Default belegt - die nachgelagerten Agenten interpretieren das als "Playbook-Default verwenden".
+
+""" + TEAM_LEAD_MEMORY_CHECK + """Befolge für den End-to-End-Workflow (falls kein Memory-Hit eine Pause ausgeloest hat und keine Direkt-Mention vorliegt) diese Schritte:
+1. Landingpage-Analyse: Delegiere die URL an den `landing_page_agent`, um USPs, Angebote und Tonalität zu extrahieren.
+2. Strategieerstellung: Beauftrage den `strategy_agent` mit diesen Erkenntnissen, eine passende Kampagnenstruktur zu entwerfen.
+3. Search-Intent-Recherche: Delegiere an den `search_intent_agent`. Dieser ruft pro Strategy-Seed live Google Autocomplete ab und kategorisiert die echten Suchanfragen nach Awareness/Consideration/Decision plus Negativ-Signalen. Das Ergebnis ist Pflicht-Input fuer den naechsten Schritt - dadurch baut der Keyword-Agent auf realen Suchdaten statt auf Halluzinationen.
+4. Keyword-Recherche: Delegiere an den `keyword_agent`, der die `search_intent`-Ergebnisse plus die LP-/Strategy-Inputs nutzt, um Keyword-Cluster mit echten User-Phrasings und passenden Match-Types zu generieren.
+5. Interaktive Anzeigenstruktur-Abfrage: Rufe den `copywriter_agent` auf. Falls der `copywriter_agent` eine Frage zur Struktur der Headlines an den Nutzer stellt, reiche diese Frage unverändert an den Benutzer weiter und unterbrich den automatischen Workflow. Sobald der Benutzer antwortet, nimm diese Struktur-Vorgabe auf und fahre fort.
+6. Anzeigen-Erstellung pro Cluster: Beauftrage den `copywriter_agent`, für JEDES vom `keyword_agent` erstellte Keyword-Cluster eine eigene Responsive Search Ad (RSA) bestehend aus bis zu 15 Headlines und bis zu 4 Descriptions zu erstellen, basierend auf der vom Benutzer ausgewählten Headline-Struktur und der Tonalität des Kunden. (Achtung: der copywriter_agent gibt hier noch keine Beispiele oder Tabellen aus!)
+7. Zusammenführung: Führe die Ergebnisse so zusammen, dass für jedes Keyword-Cluster die dazugehörigen Keywords sowie die passenden Anzeigentexte (Headlines und Descriptions) direkt nacheinander dargestellt werden.
+8. RSA-Beispiele & Zeichenanzahl-Tabelle (SEPARATER SCHRITT): Rufe nun den `copywriter_agent` erneut auf mit dem Auftrag, für die soeben erstellten Anzeigen 3 konkrete RSA-Beispiel-Anzeigen (aus echten Headlines von Position 1 / Position 2 / Position 3 kombiniert) sowie die Zeichenanzahl-Tabelle in einem HTML details-Tag auszugeben. Dadurch werden die Beispiele und die Tabelle in einer eigenen, separaten Nachricht dargestellt.
+9. Excel-Export: Übergib alle generierten Informationen (Kampagnen-Strategie, Keywords, Anzeigentexte und eventuelle Optimierungsempfehlungen) an den `excel_exporter_agent`, um diese strukturiert als Excel-Datei (.xlsx) mit mehreren Tabellenblättern zu exportieren. Präsentiere dem Benutzer das Zusammenführungs-Ergebnis und nenne am Ende den absoluten Pfad der exportierten Excel-Datei.
+
+Wenn der Benutzer eine Optimierungsanfrage stellt (z. B. basierend auf KPIs wie CTR, Qualitätsfaktor, Conversions oder Suchbegriffen), delegiere diese Aufgabe an den `optimizer_team_lead`.
+
+Wenn der Benutzer die geplante Kampagne tatsächlich in Google Ads aufsetzen möchte (z. B. "in Google Ads anlegen", "Kampagne aufsetzen", "live schalten"), delegiere an den `campaign_builder_agent`. Dieser legt ausschließlich Suchkampagnen an und erstellt grundsätzlich ALLES pausiert mit einem festen Tagesbudget von 1 Euro. Der `campaign_builder_agent` stellt dem Benutzer GENAU DREI Rückfragen in fester Reihenfolge: (1) Ziel-Konto (account_picker), (2) Kampagnen- und Anzeigengruppen-Namen anpassen (name_editor), (3) finale Bestätigung (confirm). Reiche JEDE dieser drei Rückfragen UNVERÄNDERT — inklusive der eingebetteten ```json-Blöcke (account_picker, name_editor, confirm) — an den Benutzer weiter, pausiere den Workflow und beantworte sie unter keinen Umständen selbst. Gib jede Nutzer-Antwort dann zurück an den `campaign_builder_agent` und ueberspringe keinen seiner Schritte."""),
+    sub_agents=[
+        create_landing_page_agent(),
+        create_strategy_agent(),
+        create_search_intent_agent(),
+        create_keyword_agent(),
+        create_copywriter_agent(),
+        create_translator_agent(),
+        create_optimizer_team_lead(),
+        create_excel_exporter_agent(),
+        create_campaign_builder_agent(),
+    ],
+)
+
+app = App(
+    root_agent=root_agent,
+    name="app",
+)

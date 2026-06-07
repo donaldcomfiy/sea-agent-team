@@ -1,0 +1,6 @@
+{
+  "name": "Ads AI Agent",
+  "description": "A dark mode dashboard for a Google Ads Agent Platform allowing campaign creation and optimization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
