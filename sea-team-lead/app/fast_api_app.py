@@ -121,22 +121,30 @@ app: FastAPI = get_fast_api_app(
     agents_dir=AGENT_DIR,
     web=False,
     artifact_service_uri=artifact_service_uri,
-    allow_origins=allow_origins,
+    # Do NOT pass allow_origins here — the ADK adds its own _OriginCheckMiddleware
+    # which conflicts with our CORSMiddleware. We handle CORS ourselves below.
+    allow_origins=None,
     session_service_uri=session_service_uri,
     otel_to_cloud=otel_to_cloud,
 )
 app.title = "sea-team-lead"
 app.description = "API for interacting with the Agent sea-team-lead"
 
+# Single CORSMiddleware for ALL routes (ADK + custom). Added as the outermost
+# middleware so it wraps every response, including error responses from auth.
 if allow_origins:
-    # Apply an explicit top-level CORS middleware for all custom routes and
-    # error responses. The ADK app already gets allow_origins, but our own
-    # auth/middleware stack can otherwise produce 401/403 responses without the
-    # CORS headers Chrome expects.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allow_origins,
         allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    # No ALLOW_ORIGINS set — allow everything (dev mode)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
         allow_methods=["*"],
         allow_headers=["*"],
     )
