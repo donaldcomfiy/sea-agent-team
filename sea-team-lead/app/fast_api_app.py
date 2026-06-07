@@ -77,7 +77,7 @@ except Exception:
     import logging
     logger = logging.getLogger(__name__)
 def _normalize_origin(origin: str) -> str:
-    return origin.strip().rstrip("/")
+    return origin.strip().strip("'\"").rstrip("/")
 
 
 def _parse_allow_origins() -> list[str] | None:
