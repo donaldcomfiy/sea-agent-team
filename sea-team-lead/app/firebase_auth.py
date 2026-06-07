@@ -16,6 +16,7 @@ _firebase_app = None
 _enabled = False
 _configured = False
 _init_error: str | None = None
+_adc_broken = False  # Set True after first verify_id_token credential failure → skip all future attempts
 _auth_logger = logging.getLogger("sea_team_lead.auth")
 
 
@@ -65,7 +66,9 @@ def get_current_user(request: Request) -> AuthUser | None:
     Returns AuthUser when Firebase is configured, None when it's not (dev mode).
     Raises 401 when Firebase IS configured but the token is missing/invalid.
     """
-    if not _enabled:
+    global _adc_broken
+
+    if not _enabled or _adc_broken:
         return None
 
     auth_header = request.headers.get("Authorization", "")
@@ -85,9 +88,12 @@ def get_current_user(request: Request) -> AuthUser | None:
         _infra_keywords = ("credentials", "application default", "not found",
                            "could not automatically determine", "adc")
         if any(kw in exc_str for kw in _infra_keywords):
+            # Permanently disable token verification for this process — every
+            # future call would hit the same ~20s timeout before failing.
+            _adc_broken = True
             _auth_logger.warning(
-                "Firebase verify_id_token infrastructure error — "
-                "falling back to open mode for %s: %s", request.url.path, exc,
+                "Firebase verify_id_token credentials broken — disabling auth "
+                "permanently for this instance (open mode). Error: %s", exc,
             )
             return None
         _auth_logger.warning("Firebase token verification failed for %s: %s", request.url.path, exc)
