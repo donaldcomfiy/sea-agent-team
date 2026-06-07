@@ -1,0 +1,44 @@
+# Auto-deploy frontend to Firebase Hosting on push to main
+name: Deploy Frontend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ads-ai-agent/**'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: ads-ai-agent/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: ads-ai-agent
+
+      - name: Build
+        run: npm run build
+        working-directory: ads-ai-agent
+        env:
+          VITE_API_BASE_URL: https://sea-team-lead-239331834763.europe-west1.run.app
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_AUTH_DOMAIN: ads-ai-agent-florian.firebaseapp.com
+          VITE_FIREBASE_MESSAGING_SENDER_ID: "239331834763"
+          VITE_FIREBASE_PROJECT_ID: ads-ai-agent-florian
+          VITE_FIREBASE_STORAGE_BUCKET: ads-ai-agent-florian.firebasestorage.app
+
+      - uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          channelId: live
+          projectId: ads-ai-agent-florian
+          entryPoint: ads-ai-agent

@@ -1,0 +1,43 @@
+# Auto-deploy backend to Cloud Run on push to main
+name: Deploy Backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sea-team-lead/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # Required for Workload Identity Federation
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker gcr.io --quiet
+
+      - name: Build and push image
+        run: |
+          docker build -t gcr.io/ads-ai-agent-florian/sea-team-lead:${{ github.sha }} ./sea-team-lead
+          docker push gcr.io/ads-ai-agent-florian/sea-team-lead:${{ github.sha }}
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy sea-team-lead \
+            --image=gcr.io/ads-ai-agent-florian/sea-team-lead:${{ github.sha }} \
+            --region=europe-west1 \
+            --project=ads-ai-agent-florian \
+            --platform=managed

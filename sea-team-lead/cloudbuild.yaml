@@ -1,0 +1,28 @@
+# Cloud Build config — triggered on push to main (sea-team-lead/ changes)
+# Builds Docker image and deploys to Cloud Run.
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/sea-team-lead:$COMMIT_SHA', '.']
+    dir: 'sea-team-lead'
+
+  # Push the container image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/sea-team-lead:$COMMIT_SHA']
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'sea-team-lead'
+      - '--image=gcr.io/$PROJECT_ID/sea-team-lead:$COMMIT_SHA'
+      - '--region=europe-west1'
+      - '--platform=managed'
+
+images:
+  - 'gcr.io/$PROJECT_ID/sea-team-lead:$COMMIT_SHA'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
