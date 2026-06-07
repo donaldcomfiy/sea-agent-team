@@ -47,6 +47,7 @@ if "VITE_GEMINI_API_KEY" in os.environ and not os.environ.get("GEMINI_API_KEY"):
 import google.auth
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 # Note: StaticFiles is no longer imported — the scaffold frontend mount was
 # removed (see comment near line 685). Re-add `from fastapi.staticfiles import
@@ -123,6 +124,19 @@ app: FastAPI = get_fast_api_app(
 )
 app.title = "sea-team-lead"
 app.description = "API for interacting with the Agent sea-team-lead"
+
+if allow_origins:
+    # Apply an explicit top-level CORS middleware for all custom routes and
+    # error responses. The ADK app already gets allow_origins, but our own
+    # auth/middleware stack can otherwise produce 401/403 responses without the
+    # CORS headers Chrome expects.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allow_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter

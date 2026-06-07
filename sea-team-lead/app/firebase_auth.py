@@ -7,6 +7,7 @@ get_current_user returns None — so local development without Firebase still wo
 """
 
 import os
+import logging
 from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request
@@ -15,6 +16,7 @@ _firebase_app = None
 _enabled = False
 _configured = False
 _init_error: str | None = None
+_auth_logger = logging.getLogger("sea_team_lead.auth")
 
 
 def _init():
@@ -65,13 +67,15 @@ def get_current_user(request: Request) -> AuthUser | None:
 
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
+        _auth_logger.warning("Missing or invalid Authorization header for %s", request.url.path)
         raise HTTPException(status_code=401, detail="Authorization header fehlt oder ungueltig")
 
     token = auth_header[7:]
     try:
         from firebase_admin import auth
         decoded = auth.verify_id_token(token)
-    except Exception:
+    except Exception as exc:
+        _auth_logger.warning("Firebase token verification failed for %s: %s", request.url.path, exc)
         raise HTTPException(status_code=401, detail="Ungueltiger oder abgelaufener Token")
 
     return AuthUser(uid=decoded["uid"], email=decoded.get("email"))

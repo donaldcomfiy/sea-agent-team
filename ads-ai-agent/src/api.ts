@@ -1,6 +1,7 @@
 // Talks to the sea-team-lead ADK FastAPI backend (proxied by Vite, see vite.config.ts).
 import type { Msg } from './messageTypes';
 import { auth } from './firebase';
+import { onAuthStateChanged, type User } from 'firebase/auth';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 
@@ -8,10 +9,28 @@ function apiUrl(path: string): string {
   return API_BASE_URL ? `${API_BASE_URL}${path}` : path;
 }
 
+async function getAuthenticatedUser(): Promise<User | null> {
+  if (!auth) return null;
+  if (auth.currentUser) return auth.currentUser;
+
+  return new Promise((resolve) => {
+    const timeout = window.setTimeout(() => {
+      unsubscribe();
+      resolve(auth.currentUser);
+    }, 2000);
+
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      window.clearTimeout(timeout);
+      unsubscribe();
+      resolve(user);
+    });
+  });
+}
+
 async function authFetch(url: string, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
   try {
-    const user = auth?.currentUser;
+    const user = await getAuthenticatedUser();
     if (user) {
       const token = await user.getIdToken();
       headers.set('Authorization', `Bearer ${token}`);
