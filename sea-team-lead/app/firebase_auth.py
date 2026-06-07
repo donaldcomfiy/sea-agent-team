@@ -29,14 +29,23 @@ def _init():
         import firebase_admin
         from firebase_admin import credentials
 
+        # On Railway / non-GCP hosts there are no Application Default Credentials.
+        # firebase-admin can verify ID tokens with just the project ID (it fetches
+        # Google's public keys to check the JWT signature). No service account needed.
         if not firebase_admin._apps:
-            cred = credentials.ApplicationDefault()
-            _firebase_app = firebase_admin.initialize_app(cred, {"projectId": project_id})
+            try:
+                cred = credentials.ApplicationDefault()
+            except Exception:
+                cred = None
+            _firebase_app = firebase_admin.initialize_app(
+                cred, {"projectId": project_id}
+            )
         else:
             _firebase_app = firebase_admin.get_app()
         _enabled = True
     except Exception as exc:
         _init_error = str(exc)
+        _auth_logger.warning("Firebase Admin init failed: %s — auth will be disabled", exc)
 
 
 _init()
@@ -54,14 +63,6 @@ def get_current_user(request: Request) -> AuthUser | None:
     Returns AuthUser when Firebase is configured, None when it's not (dev mode).
     Raises 401 when Firebase IS configured but the token is missing/invalid.
     """
-    if _configured and not _enabled:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Firebase Auth ist konfiguriert, aber serverseitig nicht initialisiert: "
-                f"{_init_error or 'unbekannter Fehler'}"
-            ),
-        )
     if not _enabled:
         return None
 

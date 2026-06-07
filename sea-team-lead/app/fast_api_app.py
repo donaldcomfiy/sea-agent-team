@@ -195,6 +195,23 @@ def _validate_adk_user_scope(request: Request) -> JSONResponse | None:
     return None
 
 
+def _add_cors_headers(response, request: Request):
+    """Attach CORS headers to error responses produced inside middleware.
+
+    The CORSMiddleware only decorates responses that flow through call_next.
+    When our middleware short-circuits (401/403/503), the response bypasses
+    CORSMiddleware and Chrome blocks it for missing Access-Control-Allow-Origin.
+    """
+    origin = request.headers.get("origin")
+    if origin and allow_origins:
+        # Only reflect origins that are in the allow-list
+        normalized = origin.strip().rstrip("/")
+        if normalized in allow_origins or "*" in allow_origins:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
+
+
 @app.middleware("http")
 async def enforce_user_scope(request: Request, call_next):
     if request.method == "OPTIONS":
@@ -211,7 +228,7 @@ async def enforce_user_scope(request: Request, call_next):
         if path.startswith("/apps/") or path == "/run_sse":
             scoped_response = _validate_adk_user_scope(request)
             if scoped_response is not None:
-                return scoped_response
+                return _add_cors_headers(scoped_response, request)
 
             requested_user_id: str | None = None
             user = get_current_user(request)
@@ -243,7 +260,10 @@ async def enforce_user_scope(request: Request, call_next):
 
         return await call_next(request)
     except HTTPException as exc:
-        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        return _add_cors_headers(
+            JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}),
+            request,
+        )
     finally:
         if should_reset and context_token is not None:
             reset_current_user_id(context_token)
