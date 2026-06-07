@@ -91,6 +91,9 @@ def _parse_allow_origins() -> list[str] | None:
 
 allow_origins = _parse_allow_origins()
 
+_startup_logger = logging.getLogger("sea_team_lead.startup")
+_startup_logger.warning("CORS allow_origins=%r (raw env=%r)", allow_origins, os.getenv("ALLOW_ORIGINS", ""))
+
 # Artifact bucket for ADK (created by Terraform, passed via env var)
 logs_bucket_name = os.environ.get("LOGS_BUCKET_NAME")
 
