@@ -76,6 +76,15 @@ def get_current_user(request: Request) -> AuthUser | None:
         from firebase_admin import auth
         decoded = auth.verify_id_token(token)
     except Exception as exc:
+        exc_str = str(exc).lower()
+        if "credentials" in exc_str or "application default" in exc_str:
+            # Infrastructure issue (no GCP credentials on this host), not an
+            # invalid token. Degrade to open mode instead of blocking.
+            _auth_logger.warning(
+                "Firebase verify_id_token needs ADC but none found — "
+                "falling back to open mode for %s", request.url.path,
+            )
+            return None
         _auth_logger.warning("Firebase token verification failed for %s: %s", request.url.path, exc)
         raise HTTPException(status_code=401, detail="Ungueltiger oder abgelaufener Token")
 
