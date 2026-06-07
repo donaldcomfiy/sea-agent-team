@@ -79,12 +79,15 @@ def get_current_user(request: Request) -> AuthUser | None:
         decoded = auth.verify_id_token(token)
     except Exception as exc:
         exc_str = str(exc).lower()
-        if "credentials" in exc_str or "application default" in exc_str:
-            # Infrastructure issue (no GCP credentials on this host), not an
-            # invalid token. Degrade to open mode instead of blocking.
+        # Infrastructure issues (no GCP credentials on Railway / non-GCP hosts)
+        # should degrade to open mode, not reject users.  Match generously —
+        # the exact wording varies across google-auth / firebase-admin versions.
+        _infra_keywords = ("credentials", "application default", "not found",
+                           "could not automatically determine", "adc")
+        if any(kw in exc_str for kw in _infra_keywords):
             _auth_logger.warning(
-                "Firebase verify_id_token needs ADC but none found — "
-                "falling back to open mode for %s", request.url.path,
+                "Firebase verify_id_token infrastructure error — "
+                "falling back to open mode for %s: %s", request.url.path, exc,
             )
             return None
         _auth_logger.warning("Firebase token verification failed for %s: %s", request.url.path, exc)

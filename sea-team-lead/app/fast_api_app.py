@@ -47,7 +47,6 @@ if "VITE_GEMINI_API_KEY" in os.environ and not os.environ.get("GEMINI_API_KEY"):
 import google.auth
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 # Note: StaticFiles is no longer imported — the scaffold frontend mount was
 # removed (see comment near line 685). Re-add `from fastapi.staticfiles import
@@ -117,37 +116,29 @@ otel_to_cloud = has_gcp_creds and os.environ.get("OTEL_TO_CLOUD", "false").lower
 # web=False disables the bundled ADK Angular dev UI (and its builder endpoints)
 # so we can serve our own SPA at "/" instead. The agent API routes (/run_sse,
 # /apps/.../sessions, ...) are registered regardless of this flag.
+#
+# CORS strategy: let the ADK handle CORS entirely via its own CORSMiddleware +
+# _OriginCheckMiddleware. We MUST pass allow_origins here because:
+#   1. The ADK always adds _OriginCheckMiddleware which blocks cross-origin POST
+#      requests when no allowed origins are configured (same-origin check fails
+#      when frontend and backend are on different Railway subdomains).
+#   2. The ADK's CORSMiddleware sits inside _OriginCheckMiddleware, so all
+#      responses (including error responses from our HTTP middleware) flow
+#      through it and get proper CORS headers automatically.
+#   3. Adding our OWN CORSMiddleware on top would cause DUPLICATE
+#      Access-Control-Allow-Origin headers which browsers reject.
 app: FastAPI = get_fast_api_app(
     agents_dir=AGENT_DIR,
     web=False,
     artifact_service_uri=artifact_service_uri,
-    # Do NOT pass allow_origins here — the ADK adds its own _OriginCheckMiddleware
-    # which conflicts with our CORSMiddleware. We handle CORS ourselves below.
-    allow_origins=None,
+    allow_origins=allow_origins or ["*"],
     session_service_uri=session_service_uri,
     otel_to_cloud=otel_to_cloud,
 )
 app.title = "sea-team-lead"
 app.description = "API for interacting with the Agent sea-team-lead"
 
-# Single CORSMiddleware for ALL routes (ADK + custom). Added as the outermost
-# middleware so it wraps every response, including error responses from auth.
-if allow_origins:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=allow_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-else:
-    # No ALLOW_ORIGINS set — allow everything (dev mode)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+# Do NOT add our own CORSMiddleware — the ADK handles it (see comment above).
 
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
@@ -206,25 +197,14 @@ def _validate_adk_user_scope(request: Request) -> JSONResponse | None:
     return None
 
 
-def _add_cors_headers(response, request: Request):
-    """Attach CORS headers to error responses produced inside middleware.
-
-    The CORSMiddleware only decorates responses that flow through call_next.
-    When our middleware short-circuits (401/403/503), the response bypasses
-    CORSMiddleware and Chrome blocks it for missing Access-Control-Allow-Origin.
-    """
-    origin = request.headers.get("origin")
-    if origin and allow_origins:
-        # Only reflect origins that are in the allow-list
-        normalized = origin.strip().rstrip("/")
-        if normalized in allow_origins or "*" in allow_origins:
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-    return response
-
-
 @app.middleware("http")
 async def enforce_user_scope(request: Request, call_next):
+    """Per-request auth, user-context, and ADK user-scope enforcement.
+
+    Error responses (JSONResponse) returned here flow back through the ADK's
+    CORSMiddleware which adds the correct CORS headers automatically — no
+    manual header injection needed.
+    """
     if request.method == "OPTIONS":
         return await call_next(request)
 
@@ -239,7 +219,7 @@ async def enforce_user_scope(request: Request, call_next):
         if path.startswith("/apps/") or path == "/run_sse":
             scoped_response = _validate_adk_user_scope(request)
             if scoped_response is not None:
-                return _add_cors_headers(scoped_response, request)
+                return scoped_response
 
             requested_user_id: str | None = None
             user = get_current_user(request)
@@ -271,10 +251,7 @@ async def enforce_user_scope(request: Request, call_next):
 
         return await call_next(request)
     except HTTPException as exc:
-        return _add_cors_headers(
-            JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}),
-            request,
-        )
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     finally:
         if should_reset and context_token is not None:
             reset_current_user_id(context_token)
