@@ -1,5 +1,5 @@
 import React from 'react';
-import { HelpCircle, Bell, LogOut, Globe, Check, Settings as SettingsIcon } from 'lucide-react';
+import { LogOut, Globe, Check, Settings as SettingsIcon } from 'lucide-react';
 import { useAuth } from '../auth';
 import { useI18n, type Lang } from '../i18n';
 import { agentMeta } from '../agents';
@@ -164,13 +164,6 @@ export default function Header({ onOpenSettings }: { onOpenSettings?: () => void
           className="text-[#A1A1AA] hover:text-[#FAFAFA] transition-colors flex items-center justify-center border border-[#27272A] w-8 h-8 rounded-full bg-[#111111] hover:bg-[#18181A]"
         >
           <SettingsIcon size={16} />
-        </button>
-        <button className="text-[#A1A1AA] hover:text-[#FAFAFA] transition-colors flex items-center justify-center border border-[#27272A] w-8 h-8 rounded-full bg-[#111111] hover:bg-[#18181A]">
-          <HelpCircle size={16} />
-        </button>
-        <button className="text-[#A1A1AA] hover:text-[#FAFAFA] transition-colors relative">
-          <Bell size={20} />
-          <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-[#EF4444] rounded-full text-[8px] flex items-center justify-center font-bold text-white border-2 border-[#0A0A0A]">3</span>
         </button>
         <UserMenu />
       </div>
