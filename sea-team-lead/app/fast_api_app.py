@@ -75,9 +75,20 @@ try:
 except Exception:
     import logging
     logger = logging.getLogger(__name__)
-allow_origins = (
-    os.getenv("ALLOW_ORIGINS", "").split(",") if os.getenv("ALLOW_ORIGINS") else None
-)
+def _normalize_origin(origin: str) -> str:
+    return origin.strip().rstrip("/")
+
+
+def _parse_allow_origins() -> list[str] | None:
+    raw = os.getenv("ALLOW_ORIGINS", "")
+    if not raw:
+        return None
+    origins = [_normalize_origin(origin) for origin in raw.split(",")]
+    origins = [origin for origin in origins if origin]
+    return origins or None
+
+
+allow_origins = _parse_allow_origins()
 
 # Artifact bucket for ADK (created by Terraform, passed via env var)
 logs_bucket_name = os.environ.get("LOGS_BUCKET_NAME")
@@ -856,7 +867,7 @@ def _oauth_close_page(message: str, ok: bool) -> str:
     import html as html_mod
     safe_message = html_mod.escape(message)
     color = "#4ADE80" if ok else "#FCA5A5"
-    post_origin = os.environ.get("FRONTEND_ORIGIN", "").strip()
+    post_origin = _normalize_origin(os.environ.get("FRONTEND_ORIGIN", ""))
     target_origin = f"'{post_origin}'" if post_origin else "location.origin"
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>Google Ads</title></head>
 <body style="font-family:system-ui;background:#0A0A0A;color:#FAFAFA;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
