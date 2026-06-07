@@ -183,6 +183,9 @@ def _validate_adk_user_scope(request: Request) -> JSONResponse | None:
 
 @app.middleware("http")
 async def enforce_user_scope(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     path = request.url.path
     if path == "/run_sse":
         await request.body()
