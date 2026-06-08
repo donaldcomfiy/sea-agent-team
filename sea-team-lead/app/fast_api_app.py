@@ -245,7 +245,13 @@ async def enforce_user_scope(request: Request, call_next):
                 # request-scoped user before downstream tool calls finish.
                 should_reset = False
         elif path.startswith("/google-ads") or path.startswith("/google-sheets") or path == "/integrations/status":
-            context_user_id = _request_user_id(request)
+            # The OAuth callback is invoked by Google's redirect (plain browser
+            # GET, no Authorization header). It's protected by the CSRF state
+            # token, not by Firebase auth.
+            if path == "/google-ads/oauth/callback":
+                context_user_id = None
+            else:
+                context_user_id = _request_user_id(request)
 
         context_token = set_current_user_id(context_user_id)
 
