@@ -8,6 +8,8 @@ import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import ChatArea from './components/ChatArea';
 import SettingsPage from './components/SettingsPage';
+import SearchPage from './components/SearchPage';
+import AutomationsPage from './components/AutomationsPage';
 import Login from './components/Login';
 import { useAuth } from './auth';
 import { getConversation } from './api';
@@ -25,9 +27,9 @@ export default function App() {
   const [initialDownload, setInitialDownload] = React.useState<string | null>(null);
   const [chatNonce, setChatNonce] = React.useState(0);
   const [sidebarRefresh, setSidebarRefresh] = React.useState(0);
-  // 'chat' | 'settings' — settings renders as an overlay so the live ChatArea
-  // stays mounted underneath (conversation isn't lost when opening settings).
-  const [view, setView] = React.useState<'chat' | 'settings'>('chat');
+  // View state — overlays render on top of the live ChatArea so the
+  // conversation isn't lost when opening settings / search / automations.
+  const [view, setView] = React.useState<'chat' | 'settings' | 'search' | 'automations'>('chat');
 
   if (loading) {
     return (
@@ -71,6 +73,9 @@ export default function App() {
         refreshKey={sidebarRefresh}
         onNewChat={newChat}
         onSelectChat={selectChat}
+        onOpenSearch={() => setView('search')}
+        onOpenAutomations={() => setView('automations')}
+        activeView={view}
       />
       <div className="flex flex-col flex-1 min-w-0 bg-[#0A0A0A] relative">
         <Header onOpenSettings={() => setView('settings')} />
@@ -86,6 +91,16 @@ export default function App() {
           {view === 'settings' && (
             <div className="absolute inset-0 bg-[#0A0A0A] z-30 overflow-y-auto">
               <SettingsPage onBack={() => setView('chat')} />
+            </div>
+          )}
+          {view === 'search' && (
+            <div className="absolute inset-0 bg-[#0A0A0A] z-30 overflow-y-auto">
+              <SearchPage userId={userId} onBack={() => setView('chat')} onSelectChat={(convId) => { selectChat(convId); }} />
+            </div>
+          )}
+          {view === 'automations' && (
+            <div className="absolute inset-0 bg-[#0A0A0A] z-30 overflow-y-auto">
+              <AutomationsPage onBack={() => setView('chat')} />
             </div>
           )}
         </main>

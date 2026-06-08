@@ -1,5 +1,5 @@
 import React from 'react';
-import { Plus, Command, Trash2, MessageSquare } from 'lucide-react';
+import { Plus, Command, Trash2, MessageSquare, Search, Zap } from 'lucide-react';
 import { listConversations, deleteConversation, type ConversationSummary } from '../api';
 import { useI18n, type Lang } from '../i18n';
 
@@ -23,9 +23,12 @@ interface SidebarProps {
   refreshKey: number;
   onNewChat: () => void;
   onSelectChat: (convId: string) => void;
+  onOpenSearch?: () => void;
+  onOpenAutomations?: () => void;
+  activeView?: 'chat' | 'search' | 'automations' | 'settings';
 }
 
-export default function Sidebar({ userId, activeConvId, refreshKey, onNewChat, onSelectChat }: SidebarProps) {
+export default function Sidebar({ userId, activeConvId, refreshKey, onNewChat, onSelectChat, onOpenSearch, onOpenAutomations, activeView = 'chat' }: SidebarProps) {
   const { t, lang } = useI18n();
   const [chats, setChats] = React.useState<ConversationSummary[]>([]);
 
@@ -73,6 +76,34 @@ export default function Sidebar({ userId, activeConvId, refreshKey, onNewChat, o
           </div>
         </button>
       </div>
+
+      {/* Navigation items */}
+      <div className="px-3 pb-2 flex flex-col gap-0.5">
+        <button
+          onClick={onOpenSearch}
+          className={`w-full flex items-center gap-2.5 text-[13px] py-2 px-3 rounded-lg transition-colors ${
+            activeView === 'search'
+              ? 'bg-[#18181A] text-[#FAFAFA]'
+              : 'text-[#A1A1AA] hover:bg-[#111111] hover:text-[#E4E4E7]'
+          }`}
+        >
+          <Search size={15} strokeWidth={2} />
+          <span>{t('sidebar.search')}</span>
+        </button>
+        <button
+          onClick={onOpenAutomations}
+          className={`w-full flex items-center gap-2.5 text-[13px] py-2 px-3 rounded-lg transition-colors ${
+            activeView === 'automations'
+              ? 'bg-[#18181A] text-[#FAFAFA]'
+              : 'text-[#A1A1AA] hover:bg-[#111111] hover:text-[#E4E4E7]'
+          }`}
+        >
+          <Zap size={15} strokeWidth={2} />
+          <span>{t('sidebar.automations')}</span>
+        </button>
+      </div>
+
+      <div className="mx-5 border-t border-[#1F1F1F]" />
 
       {/* Recent chats (live from backend) */}
       <div className="flex-1 overflow-y-auto px-3 py-2 flex flex-col gap-1">

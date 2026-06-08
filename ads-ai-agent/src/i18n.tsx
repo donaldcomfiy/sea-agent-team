@@ -29,6 +29,9 @@ const DICT = {
   'header.language': { en: 'Language', de: 'Sprache' },
 
   'sidebar.newChat': { en: 'New chat', de: 'Neuer Chat' },
+  'sidebar.search': { en: 'Search', de: 'Suche' },
+  'sidebar.searchPlaceholder': { en: 'Search conversations…', de: 'Konversationen durchsuchen…' },
+  'sidebar.automations': { en: 'Automations', de: 'Automatisierungen' },
   'sidebar.recentChats': { en: 'Recent chats', de: 'Letzte Chats' },
   'sidebar.emptyTitle': { en: 'No conversations yet.', de: 'Noch keine Unterhaltungen.' },
   'sidebar.emptySubtitle': { en: 'Start a chat.', de: 'Starte einen Chat.' },
@@ -235,6 +238,26 @@ const DICT = {
   'cards.campaignNegatives': { en: 'Campaign Negatives', de: 'Kampagnen-Negatives' },
   'cards.adGroupNegatives': { en: 'Ad-Group Negatives', de: 'Ad-Group-Negatives' },
   'cards.intentNegativeLabel': { en: 'Negative', de: 'Negativ' },
+
+  'search.title': { en: 'Search', de: 'Suche' },
+  'search.subtitle': {
+    en: 'Search across all your conversations and campaign data.',
+    de: 'Durchsuche alle deine Konversationen und Kampagnendaten.',
+  },
+  'search.placeholder': { en: 'Search conversations…', de: 'Konversationen durchsuchen…' },
+  'search.noResults': { en: 'No results found.', de: 'Keine Ergebnisse gefunden.' },
+  'search.hint': { en: 'Search for keywords, campaign names, or agent responses.', de: 'Suche nach Keywords, Kampagnennamen oder Agenten-Antworten.' },
+
+  'automations.title': { en: 'Automations', de: 'Automatisierungen' },
+  'automations.subtitle': {
+    en: 'Set up automated workflows for your Google Ads campaigns.',
+    de: 'Richte automatisierte Workflows für deine Google Ads Kampagnen ein.',
+  },
+  'automations.comingSoon': { en: 'Coming soon', de: 'Demnächst verfügbar' },
+  'automations.comingSoonDesc': {
+    en: 'Automated bid adjustments, scheduled reports, and alert rules — all managed by the agent team.',
+    de: 'Automatische Gebotsanpassungen, geplante Berichte und Alert-Regeln — alles vom Agenten-Team gesteuert.',
+  },
 
   'settings.mongoDbNote': {
     en: 'MongoDB Atlas is configured server-side via the environment variable <code>MDB_MCP_CONNECTION_STRING</code>. You can see live activity in the chat as green MongoDB MCP chips (connect / find / update-many).',
