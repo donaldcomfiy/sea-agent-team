@@ -216,7 +216,7 @@ function highlightTokens(text: string): React.ReactNode[] {
 }
 
 function AgentBubble({ author, time, streaming, text, onAction, variant = 'all' }: { id?: string; author: string; time: string; streaming: boolean; text: string; onAction?: (msg: string) => void; variant?: 'all' | 'prose' | 'visual' }) {
-  const { lang } = useI18n();
+  const { lang, t } = useI18n();
   const meta = agentMeta(author);
   const Icon = meta.Icon;
   const [copied, setCopied] = React.useState(false);
@@ -268,7 +268,7 @@ function AgentBubble({ author, time, streaming, text, onAction, variant = 'all' 
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#27272A] bg-[#18181A] hover:bg-[#27272A] hover:text-[#FAFAFA] text-[12px] text-[#A1A1AA] transition-colors"
             >
               {copied ? <Check size={13} className="text-[#34D399]" /> : <Copy size={13} />}
-              <span>{copied ? 'Kopiert' : 'Kopieren'}</span>
+              <span>{copied ? t('chat.copied') : t('chat.copy')}</span>
             </button>
             <button
               onClick={handleExport}
@@ -276,7 +276,7 @@ function AgentBubble({ author, time, streaming, text, onAction, variant = 'all' 
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#27272A] bg-[#18181A] hover:bg-[#27272A] hover:text-[#FAFAFA] text-[12px] text-[#A1A1AA] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <FileSpreadsheet size={13} />
-              <span>{exporting ? 'Exportiere...' : 'In Sheets exportieren'}</span>
+              <span>{exporting ? t('chat.exporting') : t('chat.exportSheets')}</span>
             </button>
           </div>
           )}
@@ -892,7 +892,7 @@ export default function ChatArea({
                       disabled={exportingFile}
                       className="flex items-center gap-2 px-5 py-3 rounded-lg bg-[#105a30] hover:bg-[#1f6f3f] text-white font-semibold transition-colors text-[14px] shadow-sm self-start disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      <FileSpreadsheet size={18} /> {exportingFile ? 'Exportiere...' : 'In Google Sheets öffnen'}
+                      <FileSpreadsheet size={18} /> {exportingFile ? t('chat.exporting') : t('chat.openInSheets')}
                     </button>
                   </div>
                 </div>

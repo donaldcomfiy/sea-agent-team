@@ -188,6 +188,58 @@ const DICT = {
     en: 'Add this redirect URI to your OAuth client first:',
     de: 'Diese Redirect-URI vorher im OAuth-Client eintragen:',
   },
+
+  'chat.copy': { en: 'Copy', de: 'Kopieren' },
+  'chat.copied': { en: 'Copied', de: 'Kopiert' },
+  'chat.exportSheets': { en: 'Export to Sheets', de: 'In Sheets exportieren' },
+  'chat.exporting': { en: 'Exporting…', de: 'Exportiere…' },
+  'chat.openInSheets': { en: 'Open in Google Sheets', de: 'In Google Sheets öffnen' },
+
+  'settings.oauthUrlError': {
+    en: 'Could not create sign-in URL (Client ID saved?).',
+    de: 'Anmelde-URL konnte nicht erstellt werden (Client-ID gespeichert?).',
+  },
+  'settings.googleAuth': { en: 'Google Authentication', de: 'Google Authentifizierung' },
+  'settings.googleAuthDesc': {
+    en: 'Connect your Google account for Ads API access and Sheets export.',
+    de: 'Google-Konto verbinden für Ads-API-Zugriff und Sheets-Export.',
+  },
+  'settings.googleAuthConnectedDesc': {
+    en: 'Google account connected — Ads API and Sheets export are active.',
+    de: 'Google-Konto verbunden — Ads-API und Sheets-Export sind aktiv.',
+  },
+  'settings.sheetsEnabled': { en: 'Google Sheets export enabled', de: 'Google-Sheets-Export aktiviert' },
+  'settings.sheetsDisabled': { en: 'Google Sheets export requires a connected account', de: 'Google-Sheets-Export erfordert ein verbundenes Konto' },
+  'settings.settingsSubtitle': {
+    en: 'Manage your integrations and connections.',
+    de: 'Verwalte deine Integrationen und Verbindungen.',
+  },
+
+  'cards.campaign': { en: 'Campaign', de: 'Kampagne' },
+  'cards.keyword': { en: 'Keyword', de: 'Keyword' },
+  'cards.matchType': { en: 'Match Type', de: 'Match Type' },
+  'cards.anchor': { en: 'Anchor', de: 'Anchor' },
+  'cards.anchorTooltip': {
+    en: 'Headline Anchor: keyword used by the Copywriter as pillar-1 material',
+    de: 'Headline-Anchor: Keyword wird vom Copywriter als Säule-1-Material verwendet',
+  },
+  'cards.anchorCopyTooltip': {
+    en: 'Headline Anchor — the Copywriter pulls pillar-1 headlines from this keyword',
+    de: 'Headline-Anchor — der Copywriter zieht Säule-1-Headlines aus diesem Keyword',
+  },
+  'cards.bidOnlyTooltip': {
+    en: 'Bidding only — keyword is booked but not used for headlines',
+    de: 'Bidding-Only — Keyword wird gebucht, aber nicht für Headlines verwendet',
+  },
+  'cards.bidOnly': { en: 'Bid only', de: 'Bid only' },
+  'cards.campaignNegatives': { en: 'Campaign Negatives', de: 'Kampagnen-Negatives' },
+  'cards.adGroupNegatives': { en: 'Ad-Group Negatives', de: 'Ad-Group-Negatives' },
+  'cards.intentNegativeLabel': { en: 'Negative', de: 'Negativ' },
+
+  'settings.mongoDbNote': {
+    en: 'MongoDB Atlas is configured server-side via the environment variable <code>MDB_MCP_CONNECTION_STRING</code>. You can see live activity in the chat as green MongoDB MCP chips (connect / find / update-many).',
+    de: 'MongoDB Atlas wird serverseitig über die Umgebungsvariable <code>MDB_MCP_CONNECTION_STRING</code> konfiguriert. Live-Aktivität siehst du im Chat als grüne MongoDB-MCP-Chips (connect / find / update-many).',
+  },
 } as const;
 
 export type TKey = keyof typeof DICT;

@@ -39,7 +39,9 @@ COPY ./data/template/adsforsocial_analyse.xlsx ./data/template/adsforsocial_anal
 
 RUN uv sync
 
-RUN useradd --create-home --shell /bin/bash appuser
+RUN useradd --create-home --shell /bin/bash appuser \
+    && mkdir -p /code/data/google_ads_settings /code/data/conversations /code/data/exports \
+    && chown -R appuser:appuser /code/data
 USER appuser
 
 ARG COMMIT_SHA=""

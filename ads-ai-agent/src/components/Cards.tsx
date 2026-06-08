@@ -46,8 +46,8 @@ function StrategyCard({ data }: { data: any }) {
       <table className="w-full text-[13px] text-left">
         <thead className="bg-[#111111] border-b border-[#27272A]">
           <tr>
-            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider">Kampagne</th>
-            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider w-[110px]">Typ</th>
+            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider">{t('cards.campaign')}</th>
+            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider w-[110px]">{t('cards.type')}</th>
             <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider w-[150px]">{t('cards.budget')}</th>
             <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider">{t('cards.bidStrategy')}</th>
             <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider w-[120px]">{t('cards.targeting')}</th>
@@ -415,6 +415,7 @@ function flattenKeywords(data: any): { rows: KwRow[]; campaignNegatives: { campa
 // of each group only) so the table reads naturally without rowspan hacks.
 // Negatives are rendered below the table as separate compact sections.
 function KeywordCard({ data }: { data: any }) {
+  const { t } = useI18n();
   const { rows, campaignNegatives, adGroupNegatives } = flattenKeywords(data);
   if (rows.length === 0) return null;
 
@@ -423,10 +424,10 @@ function KeywordCard({ data }: { data: any }) {
       <table className="w-full text-[13px] text-left">
         <thead className="bg-[#111111] border-b border-[#27272A]">
           <tr>
-            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider">Kampagne</th>
-            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider">Keyword</th>
-            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider w-[100px]">Match Type</th>
-            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider w-[80px]" title="Headline-Anchor: Keyword wird vom Copywriter als Säule-1-Material verwendet">Anchor</th>
+            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider">{t('cards.campaign')}</th>
+            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider">{t('cards.keyword')}</th>
+            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider w-[100px]">{t('cards.matchType')}</th>
+            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider w-[80px]" title={t('cards.anchorTooltip')}>{t('cards.anchor')}</th>
           </tr>
         </thead>
         <tbody>
@@ -452,13 +453,13 @@ function KeywordCard({ data }: { data: any }) {
                   {r.use_in_copy ? (
                     <span
                       className="inline-flex items-center gap-1 text-[10px] font-semibold rounded px-1.5 py-0.5 border bg-[#1f1428] text-[#A78BFA] border-[#2e1f3a]"
-                      title="Headline-Anchor — der Copywriter zieht Säule-1-Headlines aus diesem Keyword"
+                      title={t('cards.anchorCopyTooltip')}
                     >
                       <Anchor size={10} strokeWidth={2.5} />
                       Copy
                     </span>
                   ) : (
-                    <span className="text-[10px] text-[#52525B]" title="Bidding-Only — Keyword wird gebucht, aber nicht für Headlines verwendet">Bid&nbsp;only</span>
+                    <span className="text-[10px] text-[#52525B]" title={t('cards.bidOnlyTooltip')}>{t('cards.bidOnly')}</span>
                   )}
                 </td>
               </tr>
@@ -473,7 +474,7 @@ function KeywordCard({ data }: { data: any }) {
             <div key={`ag-${i}`}>
               <div className="flex items-center gap-1.5 mb-1.5">
                 <Ban size={11} className="text-[#F87171]" />
-                <span className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA]">{g.label} — Ad-Group-Negatives</span>
+                <span className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA]">{g.label} — {t('cards.adGroupNegatives')}</span>
               </div>
               <div className="flex flex-wrap gap-1">
                 {g.negs.map((n, j) => (
@@ -486,7 +487,7 @@ function KeywordCard({ data }: { data: any }) {
             <div key={`c-${i}`}>
               <div className="flex items-center gap-1.5 mb-1.5">
                 <Ban size={11} className="text-[#F87171]" />
-                <span className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA]">{g.campaign} — Kampagnen-Negatives</span>
+                <span className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA]">{g.campaign} — {t('cards.campaignNegatives')}</span>
               </div>
               <div className="flex flex-wrap gap-1">
                 {g.negs.map((n, j) => (
@@ -514,7 +515,7 @@ function intentStageStyle(stage: string): { bg: string; text: string; border: st
     case 'awareness':
       return { bg: 'bg-[#2a200a]', text: 'text-[#FBBF24]', border: 'border-[#3f3015]', label: 'Awareness' };
     case 'negative':
-      return { bg: 'bg-[#2d1417]', text: 'text-[#F87171]', border: 'border-[#6e2b30]', label: 'Negativ' };
+      return { bg: 'bg-[#2d1417]', text: 'text-[#F87171]', border: 'border-[#6e2b30]', label: 'Negative' };
     default:
       return { bg: 'bg-[#18181A]', text: 'text-[#A1A1AA]', border: 'border-[#27272A]', label: '' };
   }
@@ -532,6 +533,7 @@ function intentStageStyle(stage: string): { bg: string; text: string; border: st
 // — that way every visible row carries both its source seed AND its
 // classification without the agent having to nest the structure itself.
 function SearchIntentCard({ data }: { data: any }) {
+  const { t } = useI18n();
   const raw: Record<string, string[]> = (data.raw_autocomplete && typeof data.raw_autocomplete === 'object') ? data.raw_autocomplete : {};
   const stages: Record<string, { query: string; format?: string; source_seed?: string }[]> = data.queries_by_stage || {};
   const negatives: { query: string; reason?: string }[] = Array.isArray(data.negative_query_signals) ? data.negative_query_signals : [];
@@ -572,7 +574,7 @@ function SearchIntentCard({ data }: { data: any }) {
           proposition; explicit so the user reads it as real data. */}
       <div className="flex items-center gap-2 px-4 py-2.5 bg-[#111111] border-b border-[#27272A]">
         <div className="w-1.5 h-1.5 rounded-full bg-[#2DD4BF] animate-pulse" />
-        <span className="text-[11px] uppercase tracking-wider font-semibold text-[#2DD4BF]">Live aus Google Autocomplete</span>
+        <span className="text-[11px] uppercase tracking-wider font-semibold text-[#2DD4BF]">{t('cards.realFromGoogle')}</span>
       </div>
 
       {/* Search-bar mocks per seed */}
@@ -618,7 +620,7 @@ function SearchIntentCard({ data }: { data: any }) {
       {/* Demand distribution bar */}
       {total > 0 && (
         <div className="px-4 py-3 border-t border-[#1F1F1F]">
-          <div className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA] mb-2">Demand-Verteilung</div>
+          <div className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA] mb-2">{t('cards.demandDistribution')}</div>
           <div className="space-y-1.5">
             {([
               ['awareness', stageCounts.awareness, '#FBBF24'],
@@ -640,7 +642,7 @@ function SearchIntentCard({ data }: { data: any }) {
       {/* Top modifiers */}
       {modifiers.length > 0 && (
         <div className="px-4 py-3 border-t border-[#1F1F1F]">
-          <div className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA] mb-1.5">Top-Modifier</div>
+          <div className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA] mb-1.5">{t('cards.topModifiers')}</div>
           <div className="flex flex-wrap gap-1">
             {modifiers.map((m, i) => (
               <span key={i} className="text-[11px] text-[#D4D4D8] bg-[#18181A] border border-[#27272A] rounded px-1.5 py-0.5">{m}</span>
@@ -654,7 +656,7 @@ function SearchIntentCard({ data }: { data: any }) {
         <div className="px-4 py-3 border-t border-[#1F1F1F]">
           <div className="flex items-center gap-1.5 mb-1.5">
             <Ban size={11} className="text-[#F87171]" />
-            <span className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA]">Negativ-Signale</span>
+            <span className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA]">{t('cards.negativeSignals')}</span>
           </div>
           <div className="space-y-1">
             {negatives.map((n, i) => (
@@ -670,7 +672,7 @@ function SearchIntentCard({ data }: { data: any }) {
       {/* Ad-group mapping */}
       {mapping.length > 0 && (
         <div className="px-4 py-3 border-t border-[#1F1F1F]">
-          <div className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA] mb-1.5">Ad-Group-Mapping</div>
+          <div className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA] mb-1.5">{t('cards.adGroupMapping')}</div>
           <div className="space-y-1.5">
             {mapping.map((m, i) => {
               const s = intentStageStyle((m.query_stage || '').toLowerCase());

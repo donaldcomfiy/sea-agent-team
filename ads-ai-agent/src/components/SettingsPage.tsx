@@ -1,5 +1,5 @@
 import React from 'react';
-import { ChevronRight, ArrowLeft, Loader2, CheckCircle2, AlertCircle, Database, LogOut } from 'lucide-react';
+import { ChevronRight, ArrowLeft, Loader2, CheckCircle2, AlertCircle, Database, LogOut, Shield } from 'lucide-react';
 import { useI18n, type TKey } from '../i18n';
 import {
   getGoogleAdsSettings,
@@ -51,9 +51,6 @@ function StatusBadge({ status }: { status: Status }) {
   );
 }
 
-// Collapsible integration row. Visually a card with a left-side brand accent,
-// the integration's logo, a title + dynamic subtitle (e.g. the connected
-// account when available), and a status pill on the right. Closed by default.
 function Section({
   title,
   subtitle,
@@ -62,6 +59,7 @@ function Section({
   accent,
   iconBg,
   children,
+  defaultOpen,
 }: {
   title: string;
   subtitle?: string;
@@ -70,8 +68,9 @@ function Section({
   accent?: string;
   iconBg?: string;
   children?: React.ReactNode;
+  defaultOpen?: boolean;
 }) {
-  const [open, setOpen] = React.useState(false);
+  const [open, setOpen] = React.useState(defaultOpen ?? false);
   const hasBody = !!children;
   return (
     <div className="relative border border-[#27272A] rounded-xl bg-[#111111] overflow-hidden">
@@ -107,7 +106,6 @@ function Section({
   );
 }
 
-// Three-color SVG of Google Ads, reused as the row icon in the list.
 function GoogleAdsIcon({ size = 18 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
@@ -118,15 +116,13 @@ function GoogleAdsIcon({ size = 18 }: { size?: number }) {
   );
 }
 
-function GoogleSheetsIcon({ size = 18 }: { size?: number }) {
+function GoogleAuthIcon({ size = 18 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" fill="#0F9D58" />
-      <path d="M14 2v6h6l-6-6z" fill="#0a7c46" />
-      <rect x="7" y="11" width="10" height="1.5" fill="#FAFAFA" />
-      <rect x="7" y="14" width="10" height="1.5" fill="#FAFAFA" />
-      <rect x="7" y="17" width="10" height="1.5" fill="#FAFAFA" />
-      <rect x="11" y="11" width="1.5" height="8" fill="#0F9D58" />
+      <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/>
+      <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+      <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+      <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
     </svg>
   );
 }
@@ -159,7 +155,6 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     setAdsStatus(r.ok ? 'connected' : r.mode === 'mock' ? 'unconfigured' : 'error');
   }, []);
 
-  // Load settings on mount; auto-test if it already looks configured.
   React.useEffect(() => {
     (async () => {
       const p = await refresh();
@@ -169,7 +164,6 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     })();
   }, [refresh, runAdsTest]);
 
-  // OAuth popup -> refresh settings + re-test.
   React.useEffect(() => {
     const onMsg = async (e: MessageEvent) => {
       if (!e.data || e.data.type !== 'google-ads-oauth') return;
@@ -197,14 +191,10 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   };
 
   const disconnect = async () => {
-    // Browser confirm is sufficient for a destructive single-click action in
-    // the hackathon scope; revoke-at-Google happens server-side.
     if (!window.confirm(t('settings.disconnectConfirm'))) return;
     setDisconnecting(true);
     const p = await disconnectGoogleAds();
     if (p) setPub(p);
-    // Clear locally so the form/test result reflects the new state immediately
-    // — we don't wait for refresh() because the user just performed the action.
     setAdsResult(null);
     setAdsStatus('unconfigured');
     await refresh();
@@ -212,7 +202,6 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   };
 
   const connect = async () => {
-    // Open popup synchronously (keep the user gesture), then point it at the URL.
     const popup = window.open('', 'google-ads-oauth', 'width=520,height=680');
     await saveGoogleAdsSettings(form);
     const r = await startGoogleAdsOAuth();
@@ -220,14 +209,16 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       popup.location.href = r.auth_url;
     } else {
       popup?.close();
-      setAdsResult({ ok: false, error: 'Anmelde-URL konnte nicht erstellt werden (Client-ID gespeichert?).' });
+      setAdsResult({ ok: false, error: t('settings.oauthUrlError') });
       setAdsStatus('error');
     }
   };
 
   const redirectUri = `${window.location.origin}/google-ads/oauth/callback`;
   const googleConnected = !!pub?.refresh_token_set;
-  const sheetsStatus: Status = googleConnected ? 'connected' : 'unconfigured';
+  const authStatus: Status = googleConnected ? 'connected' : 'unconfigured';
+  const mongoSubtitle = integrations?.mongodb.detail || t('settings.mongoDbDesc');
+  const mongoStatus: Status = integrations?.mongodb.configured ? 'connected' : 'unconfigured';
 
   const field = (
     key: keyof typeof EMPTY,
@@ -247,17 +238,10 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     </label>
   );
 
-  // Subtitle for the Google Ads row: when the live test succeeded we show the
-  // first connected account (most informative); fall back to the description.
   const adsSubtitle =
     adsResult?.ok && adsResult.accounts?.[0]
       ? `${adsResult.accounts[0].name} · ${adsResult.accounts[0].id}`
       : t('settings.googleAdsDesc');
-  const sheetsSubtitle = integrations?.google_sheets.configured
-    ? integrations.google_sheets.detail || t('settings.googleSheetsDesc')
-    : t('settings.googleSheetsDesc');
-  const mongoSubtitle = integrations?.mongodb.detail || t('settings.mongoDbDesc');
-  const mongoStatus: Status = integrations?.mongodb.configured ? 'connected' : 'unconfigured';
 
   return (
     <div className="min-h-full">
@@ -266,10 +250,11 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
           <ArrowLeft size={15} /> {t('settings.backToChat')}
         </button>
         <h1 className="text-[22px] font-semibold text-[#FAFAFA] mb-1">{t('settings.pageTitle')}</h1>
-        <p className="text-[13px] text-[#71717A] mb-6">{t('settings.subtitle')}</p>
+        <p className="text-[13px] text-[#71717A] mb-6">{t('settings.settingsSubtitle')}</p>
 
         <div className="flex flex-col gap-3">
-          {/* Google Ads API */}
+
+          {/* ── 1. Google Ads — credentials only ── */}
           <Section
             title={t('settings.googleAds')}
             subtitle={adsSubtitle}
@@ -280,29 +265,10 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
           >
             <div className="flex flex-col gap-3.5">
               {field('developer_token', 'settings.developerToken', { secret: true, secretSet: pub?.developer_token_set })}
-              {field('client_id', 'settings.clientId')}
-              {field('client_secret', 'settings.clientSecret', { secret: true, secretSet: pub?.client_secret_set })}
-              {field('refresh_token', 'settings.refreshToken', { secret: true, secretSet: pub?.refresh_token_set })}
               {field('login_customer_id', 'settings.loginCustomerId')}
               {field('customer_id', 'settings.customerId')}
 
-              <div className="rounded-lg border border-[#27272A] bg-[#0A0A0A] p-3.5 flex flex-col gap-2.5">
-                <p className="text-[12px] text-[#A1A1AA] leading-relaxed">{t('settings.connectIntro')}</p>
-                <button
-                  onClick={connect}
-                  className="self-start flex items-center gap-2 text-[13px] font-semibold text-black bg-white rounded-lg px-4 py-2 hover:bg-gray-100 transition-colors"
-                >
-                  {t('settings.connect')}
-                </button>
-                <p className="text-[11px] text-[#71717A] leading-relaxed">
-                  {t('settings.redirectHint')}
-                  <br />
-                  <code className="text-[#A1A1AA] break-all">{redirectUri}</code>
-                </p>
-              </div>
-
-              <p className="text-[11px] text-[#71717A] leading-relaxed">{t('settings.securityNote')}</p>
-
+              {/* Test result */}
               {adsResult && (
                 <div
                   className={`flex items-start gap-2.5 rounded-lg px-3.5 py-3 text-[13px] border ${
@@ -336,69 +302,102 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
                 </div>
               )}
 
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                {/* Disconnect lives on the LEFT so it's visually separated from
-                    the constructive Save/Test actions on the right. Only shown
-                    when we actually have a refresh token to revoke. */}
-                {googleConnected ? (
-                  <button
-                    onClick={disconnect}
-                    disabled={disconnecting}
-                    className="inline-flex items-center gap-2 text-[12.5px] font-medium text-[#F87171] hover:text-[#FCA5A5] hover:bg-[#2d1417] border border-[#6e2b30]/40 hover:border-[#6e2b30] rounded-lg px-3 py-1.5 disabled:opacity-50 transition-colors"
-                  >
-                    {disconnecting ? <Loader2 size={13} className="animate-spin" /> : <LogOut size={13} />}
-                    {disconnecting ? t('settings.disconnecting') : t('settings.disconnect')}
-                  </button>
-                ) : (
-                  <span />
-                )}
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={save}
-                    disabled={saving}
-                    className="flex items-center gap-2 text-[13px] font-medium text-[#D4D4D8] bg-[#18181A] border border-[#27272A] rounded-lg px-4 py-2 hover:bg-[#27272A] disabled:opacity-50 transition-colors"
-                  >
-                    {saving && <Loader2 size={14} className="animate-spin" />}
-                    {savedTick && !saving ? t('settings.saved') : t('settings.save')}
-                  </button>
-                  <button
-                    onClick={runAdsTest}
-                    disabled={adsStatus === 'testing'}
-                    className="flex items-center gap-2 text-[13px] font-semibold text-black bg-white rounded-lg px-4 py-2 hover:bg-gray-100 disabled:opacity-50 transition-colors"
-                  >
-                    {adsStatus === 'testing' && <Loader2 size={14} className="animate-spin" />}
-                    {adsStatus === 'testing' ? t('settings.testing') : t('settings.test')}
-                  </button>
-                </div>
+              {/* Save + Test buttons */}
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  onClick={save}
+                  disabled={saving}
+                  className="flex items-center gap-2 text-[13px] font-medium text-[#D4D4D8] bg-[#18181A] border border-[#27272A] rounded-lg px-4 py-2 hover:bg-[#27272A] disabled:opacity-50 transition-colors"
+                >
+                  {saving && <Loader2 size={14} className="animate-spin" />}
+                  {savedTick && !saving ? t('settings.saved') : t('settings.save')}
+                </button>
+                <button
+                  onClick={runAdsTest}
+                  disabled={adsStatus === 'testing'}
+                  className="flex items-center gap-2 text-[13px] font-semibold text-black bg-white rounded-lg px-4 py-2 hover:bg-gray-100 disabled:opacity-50 transition-colors"
+                >
+                  {adsStatus === 'testing' && <Loader2 size={14} className="animate-spin" />}
+                  {adsStatus === 'testing' ? t('settings.testing') : t('settings.test')}
+                </button>
               </div>
             </div>
           </Section>
 
-          {/* Google Sheets API (shares the Google Ads OAuth connection) */}
+          {/* ── 2. Google Auth — OAuth connect/disconnect ── */}
           <Section
-            title={t('settings.googleSheets')}
-            subtitle={sheetsSubtitle}
-            status={<StatusBadge status={sheetsStatus} />}
-            icon={<GoogleSheetsIcon size={20} />}
-            accent="#0F9D58"
+            title={t('settings.googleAuth')}
+            subtitle={googleConnected ? t('settings.googleAuthConnectedDesc') : t('settings.googleAuthDesc')}
+            status={<StatusBadge status={authStatus} />}
+            icon={<GoogleAuthIcon size={20} />}
+            accent="#34A853"
             iconBg="#0a2a1c"
           >
-            <p className="text-[12px] text-[#A1A1AA] leading-relaxed">{t('settings.sheetsSharedNote')}</p>
-            {!googleConnected ? (
-              <button
-                onClick={connect}
-                className="mt-3 self-start flex items-center gap-2 text-[13px] font-semibold text-black bg-white rounded-lg px-4 py-2 hover:bg-gray-100 transition-colors"
-              >
-                {t('settings.connect')}
-              </button>
-            ) : (
-              <p className="mt-3 text-[11.5px] text-[#71717A] leading-relaxed">{t('settings.sheetsDisconnectHint')}</p>
-            )}
+            <div className="flex flex-col gap-3.5">
+              {field('client_id', 'settings.clientId')}
+              {field('client_secret', 'settings.clientSecret', { secret: true, secretSet: pub?.client_secret_set })}
+              {field('refresh_token', 'settings.refreshToken', { secret: true, secretSet: pub?.refresh_token_set })}
+
+              {!googleConnected ? (
+                <>
+                  <div className="rounded-lg border border-[#27272A] bg-[#0A0A0A] p-3.5 flex flex-col gap-2.5">
+                    <p className="text-[12px] text-[#A1A1AA] leading-relaxed">{t('settings.connectIntro')}</p>
+                    <button
+                      onClick={connect}
+                      className="self-start flex items-center gap-2 text-[13px] font-semibold text-black bg-white rounded-lg px-4 py-2 hover:bg-gray-100 transition-colors"
+                    >
+                      {t('settings.connect')}
+                    </button>
+                    <p className="text-[11px] text-[#71717A] leading-relaxed">
+                      {t('settings.redirectHint')}
+                      <br />
+                      <code className="text-[#A1A1AA] break-all">{redirectUri}</code>
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  {/* Connected state with status chips */}
+                  <div className="flex flex-col gap-2">
+                    <div className="flex items-center gap-2 text-[12.5px]">
+                      <CheckCircle2 size={14} className="text-[#4ADE80]" />
+                      <span className="text-[#D4D4D8]">Google Ads API</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-[12.5px]">
+                      <CheckCircle2 size={14} className="text-[#4ADE80]" />
+                      <span className="text-[#D4D4D8]">{t('settings.sheetsEnabled')}</span>
+                    </div>
+                  </div>
+
+                  {/* Disconnect button */}
+                  <button
+                    onClick={disconnect}
+                    disabled={disconnecting}
+                    className="self-start inline-flex items-center gap-2 text-[12.5px] font-medium text-[#F87171] hover:text-[#FCA5A5] hover:bg-[#2d1417] border border-[#6e2b30]/40 hover:border-[#6e2b30] rounded-lg px-3 py-1.5 disabled:opacity-50 transition-colors"
+                  >
+                    {disconnecting ? <Loader2 size={13} className="animate-spin" /> : <LogOut size={13} />}
+                    {disconnecting ? t('settings.disconnecting') : t('settings.disconnect')}
+                  </button>
+                </>
+              )}
+
+              <p className="text-[11px] text-[#71717A] leading-relaxed">{t('settings.securityNote')}</p>
+
+              {/* Save button for auth credentials */}
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  onClick={save}
+                  disabled={saving}
+                  className="flex items-center gap-2 text-[13px] font-medium text-[#D4D4D8] bg-[#18181A] border border-[#27272A] rounded-lg px-4 py-2 hover:bg-[#27272A] disabled:opacity-50 transition-colors"
+                >
+                  {saving && <Loader2 size={14} className="animate-spin" />}
+                  {savedTick && !saving ? t('settings.saved') : t('settings.save')}
+                </button>
+              </div>
+            </div>
           </Section>
 
-          {/* MongoDB Atlas — read-only row, configured server-side via
-              MDB_MCP_CONNECTION_STRING. We show the cluster host (creds
-              stripped by the backend) and a short explainer in the body. */}
+          {/* ── 3. MongoDB MCP — status only ── */}
           <Section
             title={t('settings.mongoDb')}
             subtitle={mongoSubtitle}
@@ -407,10 +406,9 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
             accent="#00684A"
             iconBg="#072a1f"
           >
-            <p className="text-[12px] text-[#A1A1AA] leading-relaxed">
-              MongoDB Atlas wird serverseitig über die Umgebungsvariable <code className="text-[#D4D4D8]">MDB_MCP_CONNECTION_STRING</code> konfiguriert. Live-Aktivität siehst du im Chat als grüne MongoDB-MCP-Chips (connect / find / update-many).
-            </p>
+            <p className="text-[12px] text-[#A1A1AA] leading-relaxed" dangerouslySetInnerHTML={{ __html: t('settings.mongoDbNote') }} />
           </Section>
+
         </div>
       </div>
     </div>
