@@ -214,7 +214,8 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const redirectUri = `${window.location.origin}/google-ads/oauth/callback`;
+  const apiBase = (import.meta.env.VITE_API_BASE_URL || window.location.origin).replace(/\/$/, '');
+  const redirectUri = `${apiBase}/google-ads/oauth/callback`;
   const googleConnected = !!pub?.refresh_token_set;
   const authStatus: Status = googleConnected ? 'connected' : 'unconfigured';
   const mongoSubtitle = integrations?.mongodb.detail || t('settings.mongoDbDesc');
