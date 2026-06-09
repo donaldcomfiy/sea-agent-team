@@ -33,6 +33,7 @@ export default function Sidebar({ userId, activeConvId, refreshKey, onNewChat, o
   const [chats, setChats] = React.useState<ConversationSummary[]>([]);
 
   React.useEffect(() => {
+    if (userId === 'guest') return;
     let alive = true;
     listConversations(userId)
       .then((list) => {

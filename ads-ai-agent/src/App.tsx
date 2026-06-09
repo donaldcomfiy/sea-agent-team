@@ -10,25 +10,18 @@ import ChatArea from './components/ChatArea';
 import SettingsPage from './components/SettingsPage';
 import SearchPage from './components/SearchPage';
 import AutomationsPage from './components/AutomationsPage';
-import Login from './components/Login';
 import { useAuth } from './auth';
 import { getConversation } from './api';
 import type { Msg } from './messageTypes';
 
 export default function App() {
-  const { user, loading } = useAuth();
+  const { user, loading, signIn, error } = useAuth();
 
-  // The conversation currently shown. activeConvId drives the sidebar highlight;
-  // chatNonce is the ChatArea mount identity (bumped on new/select to remount it
-  // with fresh initial data). After a save, only activeConvId changes -> the
-  // sidebar updates without remounting the live chat.
   const [activeConvId, setActiveConvId] = React.useState<string | null>(null);
   const [initialMessages, setInitialMessages] = React.useState<Msg[]>([]);
   const [initialDownload, setInitialDownload] = React.useState<string | null>(null);
   const [chatNonce, setChatNonce] = React.useState(0);
   const [sidebarRefresh, setSidebarRefresh] = React.useState(0);
-  // View state — overlays render on top of the live ChatArea so the
-  // conversation isn't lost when opening settings / search / automations.
   const [view, setView] = React.useState<'chat' | 'settings' | 'search' | 'automations'>('chat');
 
   if (loading) {
@@ -39,8 +32,7 @@ export default function App() {
     );
   }
 
-  if (!user) return <Login />;
-  const userId = user.uid;
+  const userId = user?.uid ?? 'guest';
 
   function newChat() {
     setView('chat');
@@ -51,6 +43,7 @@ export default function App() {
   }
 
   async function selectChat(convId: string) {
+    if (!user) return;
     setView('chat');
     const conv = await getConversation(userId, convId);
     setActiveConvId(convId);
@@ -59,7 +52,6 @@ export default function App() {
     setChatNonce((k) => k + 1);
   }
 
-  // ChatArea calls this after persisting a turn: highlight + refresh the list.
   function handleSaved(convId: string) {
     setActiveConvId(convId);
     setSidebarRefresh((k) => k + 1);
@@ -105,6 +97,36 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* Login overlay — app is visible behind, interaction requires sign-in */}
+      {!user && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-sm mx-4 bg-[#111113] border border-[#27272A] rounded-2xl p-8 flex flex-col items-center text-center shadow-2xl">
+            <div className="w-14 h-14 rounded-2xl bg-white text-black flex items-center justify-center mb-6 shadow-lg">
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><path d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z"/></svg>
+            </div>
+            <h2 className="text-xl font-semibold tracking-tight mb-2 text-[#FAFAFA]">Ads AI Agent</h2>
+            <p className="text-[#A1A1AA] text-[14px] leading-relaxed mb-6">
+              Sign in to start building Google Ads campaigns with AI-powered agents.
+            </p>
+            <button
+              onClick={signIn}
+              className="w-full flex items-center justify-center gap-3 bg-white text-black font-semibold text-[14px] rounded-xl px-4 py-3 hover:bg-gray-100 transition-colors shadow-sm"
+            >
+              <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+              Sign in with Google
+            </button>
+            {error && (
+              <div className="mt-4 text-[13px] text-[#FCA5A5] bg-[#2d1417] border border-[#6e2b30] rounded-lg px-4 py-2 w-full">
+                {error}
+              </div>
+            )}
+            <p className="text-[11px] text-[#52525B] mt-6 leading-relaxed">
+              Your data stays private. We only access your Google Ads account with your explicit permission.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

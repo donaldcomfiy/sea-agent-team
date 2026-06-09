@@ -470,6 +470,7 @@ export default function ChatArea({
 
   React.useEffect(() => {
     if (sessionInit.current) return; // guard against StrictMode double-run
+    if (userId === 'guest') return;
     sessionInit.current = true;
     createSession(userId).then(setSessionId).catch((e) => setError(String(e)));
   }, [userId]);
