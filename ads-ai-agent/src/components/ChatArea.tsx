@@ -478,8 +478,8 @@ export default function ChatArea({
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, busy]);
 
-  // Auto-grow the textarea so the input box matches its content height (a la
-  // Claude/ChatGPT) instead of clipping with an internal scrollbar. Reset to
+  // Auto-grow the textarea so the input box matches its content height (like
+  // modern chat UIs) instead of clipping with an internal scrollbar. Reset to
   // 'auto' first so the box can shrink when content is deleted. The CSS
   // max-h-[400px] caps unbounded growth — beyond that it scrolls internally.
   React.useLayoutEffect(() => {
