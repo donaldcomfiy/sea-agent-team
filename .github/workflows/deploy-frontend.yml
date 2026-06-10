@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'ads-ai-agent/**'
+      - 'frontend/**'
 
 jobs:
   build-and-deploy:
@@ -17,15 +17,15 @@ jobs:
         with:
           node-version: 20
           cache: 'npm'
-          cache-dependency-path: ads-ai-agent/package-lock.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
         run: npm ci
-        working-directory: ads-ai-agent
+        working-directory: frontend
 
       - name: Build
         run: npm run build
-        working-directory: ads-ai-agent
+        working-directory: frontend
         env:
           VITE_API_BASE_URL: https://sea-team-lead-239331834763.europe-west1.run.app
           VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
@@ -41,4 +41,4 @@ jobs:
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           channelId: live
           projectId: ads-ai-agent-florian
-          entryPoint: ads-ai-agent
+          entryPoint: frontend

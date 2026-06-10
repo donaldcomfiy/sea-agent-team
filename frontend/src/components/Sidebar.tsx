@@ -61,8 +61,8 @@ export default function Sidebar({ userId, activeConvId, refreshKey, onNewChat, o
 
       {/* Brand Header */}
       <div className="p-5 pb-4 flex items-center gap-3 mt-1">
-        <img src="/logo.webp" alt="Logo" width={32} height={32} className="rounded-[7px] cursor-pointer hover:opacity-90 transition-opacity" />
-        <span className="font-semibold text-[17px] tracking-tight hover:text-white/90 cursor-pointer">ADAGENTS</span>
+        <img src="/logo.webp" alt="Logo" width={32} height={32} />
+        <span className="font-semibold text-[17px] tracking-tight hover:text-white/90 cursor-pointer">SEA - AGENTS</span>
       </div>
 
       <div className="px-3 pb-4">

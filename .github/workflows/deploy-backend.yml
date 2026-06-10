@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'sea-team-lead/**'
+      - 'backend/**'
 
 jobs:
   deploy:
@@ -31,7 +31,7 @@ jobs:
 
       - name: Build and push image
         run: |
-          docker build -t gcr.io/ads-ai-agent-florian/sea-team-lead:${{ github.sha }} ./sea-team-lead
+          docker build -t gcr.io/ads-ai-agent-florian/sea-team-lead:${{ github.sha }} ./backend
           docker push gcr.io/ads-ai-agent-florian/sea-team-lead:${{ github.sha }}
 
       - name: Deploy to Cloud Run

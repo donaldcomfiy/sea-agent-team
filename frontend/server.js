@@ -15,5 +15,5 @@ app.get('*', (_req, res) => {
 });
 
 app.listen(port, '0.0.0.0', () => {
-  console.log(`ads-ai-agent listening on ${port}`);
+  console.log(`frontend listening on ${port}`);
 });

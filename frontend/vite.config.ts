@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig} from 'vite';
 
-// ADK backend (sea-team-lead) runs on :8002 in dev (moved from :8001 to avoid
+// ADK backend runs on :8002 in dev (moved from :8001 to avoid
 // clashing with an unrelated local backend that also wants 8001). We proxy
 // the ADK API routes so the browser talks same-origin. changeOrigin:false
 // keeps the Host header as localhost:3000 so ADK's origin-check middleware

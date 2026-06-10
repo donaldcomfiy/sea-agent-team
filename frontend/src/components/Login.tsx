@@ -24,7 +24,7 @@ export default function Login() {
         <div className="w-14 h-14 rounded-2xl bg-white text-black flex items-center justify-center mb-6 shadow-lg">
           <Sparkles size={26} fill="currentColor" />
         </div>
-        <h1 className="text-2xl font-semibold tracking-tight mb-2 text-[#FAFAFA]">Ads AI Agent</h1>
+        <h1 className="text-2xl font-semibold tracking-tight mb-2 text-[#FAFAFA]">SEA - AGENTS</h1>
         <p className="text-[#A1A1AA] text-[15px] leading-relaxed mb-8">
           {t('login.subtitle')}
         </p>

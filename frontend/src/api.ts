@@ -1,4 +1,4 @@
-// Talks to the sea-team-lead ADK FastAPI backend (proxied by Vite, see vite.config.ts).
+// Talks to the ADK FastAPI backend (proxied by Vite, see vite.config.ts).
 import type { Msg } from './messageTypes';
 import { auth } from './firebase';
 import { onAuthStateChanged, type User } from 'firebase/auth';

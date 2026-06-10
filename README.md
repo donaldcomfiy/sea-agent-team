@@ -2,15 +2,15 @@
 
 This repository contains the two deployable parts of the project:
 
-- `sea-team-lead/` - Python/FastAPI backend with the Google ADK multi-agent system
-- `ads-ai-agent/` - React/Vite frontend for chat, settings, auth, and exports
+- `backend/` - Python/FastAPI backend with the Google ADK multi-agent system
+- `frontend/` - React/Vite frontend for chat, settings, auth, and exports
 
 ## Local Development
 
 Backend:
 
 ```bash
-cd sea-team-lead
+cd backend
 cp .env.example .env
 uv sync
 uv run uvicorn app.fast_api_app:app --host 0.0.0.0 --port 8002
@@ -19,7 +19,7 @@ uv run uvicorn app.fast_api_app:app --host 0.0.0.0 --port 8002
 Frontend:
 
 ```bash
-cd ads-ai-agent
+cd frontend
 npm install
 npm run dev
 ```
@@ -28,8 +28,8 @@ npm run dev
 
 Deploy as two separate Railway services from this monorepo:
 
-1. Backend service root: `/sea-team-lead`
-2. Frontend service root: `/ads-ai-agent`
+1. Backend service root: `/backend`
+2. Frontend service root: `/frontend`
 
 Recommended backend environment variables:
 

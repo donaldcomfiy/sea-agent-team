@@ -61,7 +61,7 @@ uv run pytest tests/unit
 
 ## Frontend
 
-The web frontend is a separate Vite/React project in the [`ads-ai-agent/`](../ads-ai-agent) directory. In development it runs on port 5180 and proxies API calls to the backend on port 8002. See its own README for setup.
+The web frontend is a separate Vite/React project in the [`frontend/`](../frontend) directory. In development it runs on port 5180 and proxies API calls to the backend on port 8002. See its own README for setup.
 
 ## Docker
 
@@ -88,7 +88,7 @@ Safety rules enforced in code (not overridable by the LLM):
 ## Project Structure
 
 ```
-sea-team-lead/
+backend/
 ├── app/
 │   ├── agent.py                 # ADK entry point, root_agent
 │   ├── common.py                # Shared infra (env, MongoDB MCP, rules)
