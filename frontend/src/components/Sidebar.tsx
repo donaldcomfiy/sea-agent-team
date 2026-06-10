@@ -257,20 +257,19 @@ export default function Sidebar({ userId, activeConvId, refreshKey, onNewChat, o
             {filteredChats.map((chat) => {
               const active = chat.conv_id === activeConvId;
               return (
-                <Button
-                  type="button"
-                  variant="ghost"
+                <button
                   key={chat.conv_id}
                   onClick={() => onSelectChat(chat.conv_id)}
-                  className={`h-auto justify-between w-full px-3 py-2 text-[13px] overflow-hidden group ${
+                  className={`flex items-center justify-between w-full px-3 py-2 rounded-lg text-[13px] transition-colors overflow-hidden group ${
                     active ? 'bg-muted text-foreground' : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground/80'
                   }`}
                 >
-                  <span className="truncate flex-1 text-left mr-2">{chat.title}</span>
+                  <span className="truncate min-w-0 flex-1 text-left mr-2">{chat.title}</span>
                   <span className="text-[10px] text-muted-foreground flex-shrink-0 group-hover:hidden">{formatTime(chat.updated_at, lang, t('time.yesterday'))}</span>
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <span
+                        role="button"
                         onClick={(e) => handleDelete(e, chat.conv_id)}
                         className="hidden group-hover:flex items-center justify-center flex-shrink-0 text-muted-foreground hover:text-destructive transition-colors"
                       >
@@ -281,7 +280,7 @@ export default function Sidebar({ userId, activeConvId, refreshKey, onNewChat, o
                       {t('sidebar.delete')}
                     </TooltipContent>
                   </Tooltip>
-                </Button>
+                </button>
               );
             })}
           </div>
