@@ -72,7 +72,6 @@ export default function App() {
         activeView={view}
       />
       <div className="flex flex-col flex-1 min-w-0 bg-background relative">
-        <div className="h-[72px] flex-shrink-0" />
         <main className="flex-1 relative overflow-hidden">
           <ChatArea
             key={chatNonce}
