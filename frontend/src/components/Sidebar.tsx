@@ -5,7 +5,6 @@ import { useAuth } from '../auth';
 import { useI18n, type Lang } from '../i18n';
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import {
   DropdownMenu,
@@ -237,7 +236,7 @@ export default function Sidebar({ userId, activeConvId, refreshKey, onNewChat, o
       <div className="px-5"><Separator /></div>
 
       {/* Recent chats (live from backend) */}
-      <ScrollArea className="flex-1 px-3 py-2 overflow-hidden">
+      <div className="flex-1 px-3 py-2 overflow-y-auto overflow-x-hidden">
         <div className="px-3 pb-3 flex items-center justify-between">
           <span className="text-[13px] font-medium text-foreground">{t('sidebar.recentChats')}</span>
         </div>
@@ -285,7 +284,7 @@ export default function Sidebar({ userId, activeConvId, refreshKey, onNewChat, o
             })}
           </div>
         )}
-      </ScrollArea>
+      </div>
 
       <div className="px-3 py-3 border-t border-border flex flex-col gap-1">
         <div className="flex items-center gap-3 px-2.5 py-2 rounded-lg bg-card/50 border border-border/60">
