@@ -855,7 +855,7 @@ export default function ChatArea({
   return (
     <div className="flex flex-col h-full relative w-full">
       <div className="flex-1 overflow-y-auto w-full">
-        <div className="max-w-5xl mx-auto px-4 py-6 pb-56 font-sans w-full">
+        <div className="max-w-5xl mx-auto px-4 pt-[72px] pb-56 font-sans w-full">
           {isEmpty ? (
             <div className="flex flex-col items-center justify-center mt-[18vh] px-2">
               <div className="mb-6">
