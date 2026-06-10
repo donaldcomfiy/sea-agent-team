@@ -5,7 +5,6 @@
 import React from 'react';
 import { Loader2 } from 'lucide-react';
 import Sidebar from './components/Sidebar';
-import Header from './components/Header';
 import ChatArea from './components/ChatArea';
 import SettingsPage from './components/SettingsPage';
 import AgentsPage from './components/AgentsPage';
@@ -73,7 +72,7 @@ export default function App() {
         activeView={view}
       />
       <div className="flex flex-col flex-1 min-w-0 bg-background relative">
-        <Header />
+        <div className="h-[72px] flex-shrink-0" />
         <main className="flex-1 relative overflow-hidden">
           <ChatArea
             key={chatNonce}
