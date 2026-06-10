@@ -172,7 +172,7 @@ export default function Sidebar({ userId, activeConvId, refreshKey, onNewChat, o
   }, [chats, chatQuery]);
 
   return (
-    <div className="w-[260px] h-full flex flex-col bg-background border-r border-border flex-shrink-0 z-20 relative">
+    <div className="w-[260px] h-full flex flex-col bg-background border-r border-border flex-shrink-0 z-20 relative overflow-hidden">
 
       {/* Brand Header */}
       <div className="p-5 pb-4 flex items-center gap-3 mt-1">
