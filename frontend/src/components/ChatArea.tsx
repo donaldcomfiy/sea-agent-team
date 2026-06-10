@@ -85,7 +85,7 @@ function AgentAvatarRow() {
                   <img
                     src={meta.avatarUrl}
                     alt={meta.name[lang]}
-                    className={`w-full h-full rounded-full object-cover ${isLead ? '' : ''}`}
+                    className="w-full h-full rounded-full object-cover"
                   />
                 ) : (
                   <Icon size={20} strokeWidth={2.2} />
@@ -93,6 +93,57 @@ function AgentAvatarRow() {
               </div>
             </TooltipTrigger>
             <TooltipContent side="bottom" className="text-[11px]">
+              {meta.name[lang]}
+            </TooltipContent>
+          </Tooltip>
+        );
+      })}
+    </div>
+  );
+}
+
+function InputAgentBar({ activeAgent, onSelectAgent }: { activeAgent: string | null; onSelectAgent: (key: string) => void }) {
+  const { lang } = useI18n();
+
+  const currentAgent = activeAgent || 'sea_team_lead';
+
+  return (
+    <div className="flex items-center justify-center gap-1.5 mb-3">
+      {EMPTY_HERO_AGENT_KEYS.map((key) => {
+        const meta = agentMeta(key);
+        const Icon = meta.Icon;
+        const isActive = key === currentAgent;
+        const accent = meta.nameColorClass.match(/#[0-9A-Fa-f]{6}/)?.[0];
+
+        return (
+          <Tooltip key={key}>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => onSelectAgent(key)}
+                className={`rounded-full flex items-center justify-center transition-all duration-500 overflow-hidden hover:opacity-100 hover:scale-110 ${
+                  isActive ? 'w-9 h-9 opacity-100' : 'w-7 h-7 opacity-40 cursor-pointer'
+                }`}
+                style={
+                  isActive && accent
+                    ? { boxShadow: `0 0 0 2px var(--background), 0 0 0 4px ${accent}` }
+                    : undefined
+                }
+              >
+                {meta.avatarUrl ? (
+                  <img
+                    src={meta.avatarUrl}
+                    alt={meta.name[lang]}
+                    className="w-full h-full rounded-full object-cover"
+                  />
+                ) : (
+                  <div className={`w-full h-full rounded-full flex items-center justify-center ${meta.colorClass}`}>
+                    <Icon size={isActive ? 15 : 12} strokeWidth={2.2} />
+                  </div>
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="text-[11px]">
               {meta.name[lang]}
             </TooltipContent>
           </Tooltip>
@@ -501,6 +552,8 @@ export default function ChatArea({
   const [error, setError] = React.useState<string | null>(null);
   const [exportingFile, setExportingFile] = React.useState(false);
   const [input, setInput] = React.useState('');
+  // User clicked an agent avatar → override displayAgent until next send.
+  const [selectedAgent, setSelectedAgent] = React.useState<string | null>(null);
   // @mention autocomplete state.
   const [mentionOpen, setMentionOpen] = React.useState(false);
   const [mentionQuery, setMentionQuery] = React.useState('');
@@ -659,7 +712,8 @@ export default function ChatArea({
   async function send(raw: string) {
     const text = raw.trim();
     if (!text || busy || !sessionId) return;
-    setIsDemo(false); // a real send re-enables interactive cards
+    setIsDemo(false);
+    setSelectedAgent(null);
     setInput('');
     setError(null);
     setMessages((prev) => [...prev, { id: uid(), role: 'user', text, time: nowTime() }]);
@@ -852,6 +906,25 @@ export default function ChatArea({
   // which can briefly retag back to the Team Lead between his transfer events.
   const thinkingAuthor = lastMsg?.role === 'handoff' ? lastMsg.target : activeAgent;
 
+  // Stable "who's active" for the input bar and border color. During
+  // processing prefer the handoff target (more reliable than activeAgent
+  // which flickers between SSE events). When idle, show the last agent
+  // that actually sent a message.
+  const displayAgent = (() => {
+    if (busy) {
+      if (lastMsg?.role === 'handoff') return lastMsg.target;
+      if (lastMsg?.role === 'agent' && lastMsg.streaming) return (lastMsg as Extract<Msg, { role: 'agent' }>).author;
+      return activeAgent;
+    }
+    if (selectedAgent) return selectedAgent;
+    const lastAgent = [...messages].reverse().find((m) => m.role === 'agent') as Extract<Msg, { role: 'agent' }> | undefined;
+    return lastAgent?.author || null;
+  })();
+
+  const activeAccent = !isEmpty && displayAgent
+    ? agentMeta(displayAgent).nameColorClass.match(/#[0-9A-Fa-f]{6}/)?.[0]
+    : undefined;
+
   return (
     <div className="flex flex-col h-full relative w-full">
       <div className="flex-1 overflow-y-auto w-full">
@@ -983,32 +1056,26 @@ export default function ChatArea({
       <div className="absolute bottom-0 left-0 right-0 pointer-events-none bg-gradient-to-t from-background via-background via-70% to-transparent pt-16 pb-6 w-full">
         <div className="max-w-5xl mx-auto w-full px-6 pointer-events-auto">
 
-          {/* Quick-action chips — shown only when the input is empty and the
-              chat already has messages (the initial empty state already has
-              the SUGGESTIONS hero). Pre-fills the slash expansion. */}
-          {!input && !isEmpty && (
-            <div className="flex flex-wrap gap-2 mb-3 justify-center">
-              {QUICK_ACTIONS.map((qa) => {
-                const QAIcon = qa.Icon;
-                return (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    key={qa.slash}
-                    onClick={() => applyQuickAction(qa.slash)}
-                    disabled={busy || !sessionId}
-                    className="h-auto rounded-full px-3 py-1.5 text-[12.5px] text-card-foreground/80"
-                  >
-                    <QAIcon size={13} strokeWidth={2.3} />
-                    {t(qa.labelKey)}
-                  </Button>
-                );
-              })}
-            </div>
-          )}
+          {/* Agent avatar bar — visible once the chat has messages */}
+          {!isEmpty && <InputAgentBar activeAgent={displayAgent} onSelectAgent={(key) => {
+            const agent = MENTION_AGENTS.find((a) => a.key === key);
+            if (!agent) return;
+            setSelectedAgent(key);
+            const prefix = `@${agent.handle} `;
+            setInput((prev) => prev.startsWith('@') ? prefix : prefix + prev);
+            requestAnimationFrame(() => {
+              const el = inputRef.current;
+              el?.focus();
+              el?.setSelectionRange(prefix.length, el.value.length);
+            });
+          }} />}
 
-          <div className="relative bg-card border border-border rounded-3xl p-1.5 flex flex-col shadow-2xl focus-within:border-ring hover:border-ring transition-colors z-10 w-full min-w-0">
+          <div
+            className={`relative bg-card border rounded-3xl p-1.5 flex flex-col shadow-2xl transition-[border-color] duration-500 z-10 w-full min-w-0 ${
+              activeAccent ? '' : 'border-border focus-within:border-ring hover:border-ring'
+            }`}
+            style={activeAccent ? { borderColor: activeAccent } : undefined}
+          >
             {mentionOpen && mentionMatches.length > 0 && (
               <div className="absolute bottom-full mb-2 left-2 w-72 max-h-64 overflow-y-auto bg-muted border border-border rounded-xl shadow-2xl z-30 py-1">
                 {mentionMatches.map((a, i) => {
