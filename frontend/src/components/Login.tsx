@@ -1,6 +1,7 @@
 import { Sparkles } from 'lucide-react';
 import { useAuth } from '../auth';
 import { useI18n } from '../i18n';
+import { Button } from '@/components/ui/button';
 
 // Google "G" mark for the sign-in button.
 function GoogleG() {
@@ -19,23 +20,24 @@ export default function Login() {
   const { t } = useI18n();
 
   return (
-    <div className="flex flex-col items-center justify-center h-screen bg-[#0A0A0A] text-white px-6 font-sans">
+    <div className="flex flex-col items-center justify-center h-screen bg-background text-foreground px-6 font-sans">
       <div className="w-full max-w-sm flex flex-col items-center text-center">
         <div className="w-14 h-14 rounded-2xl bg-white text-black flex items-center justify-center mb-6 shadow-lg">
           <Sparkles size={26} fill="currentColor" />
         </div>
-        <h1 className="text-2xl font-semibold tracking-tight mb-2 text-[#FAFAFA]">SEA - AGENTS</h1>
-        <p className="text-[#A1A1AA] text-[15px] leading-relaxed mb-8">
+        <h1 className="text-2xl font-semibold tracking-tight mb-2 text-foreground">SEA - AGENTS</h1>
+        <p className="text-muted-foreground text-[15px] leading-relaxed mb-8">
           {t('login.subtitle')}
         </p>
 
-        <button
+        <Button
+          type="button"
           onClick={signIn}
-          className="w-full flex items-center justify-center gap-3 bg-white text-black font-semibold text-[14px] rounded-xl px-4 py-3 hover:bg-gray-100 transition-colors shadow-sm"
+          className="w-full h-auto gap-3 rounded-xl px-4 py-3 text-[14px] font-semibold shadow-sm"
         >
           <GoogleG />
           {t('login.button')}
-        </button>
+        </Button>
 
         {error && (
           <div className="mt-5 text-[13px] text-[#FCA5A5] bg-[#2d1417] border border-[#6e2b30] rounded-lg px-4 py-2 w-full">
@@ -43,7 +45,7 @@ export default function Login() {
           </div>
         )}
 
-        <p className="text-[11px] text-[#71717A] mt-8 leading-relaxed">
+        <p className="text-[11px] text-muted-foreground mt-8 leading-relaxed">
           {t('login.disclaimer')}
         </p>
       </div>

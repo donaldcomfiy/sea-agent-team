@@ -2,6 +2,8 @@ import React from 'react';
 import { ArrowLeft, Search } from 'lucide-react';
 import { listConversations, getConversation, type ConversationSummary } from '../api';
 import { useI18n } from '../i18n';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 
 interface SearchPageProps {
   userId: string;
@@ -25,10 +27,8 @@ export default function SearchPage({ userId, onBack, onSelectChat }: SearchPageP
   const [conversations, setConversations] = React.useState<ConversationSummary[]>([]);
   const inputRef = React.useRef<HTMLInputElement>(null);
 
-  // Load all conversations on mount for client-side search
   React.useEffect(() => {
     listConversations(userId).then(setConversations).catch(() => {});
-    // Auto-focus the search input
     setTimeout(() => inputRef.current?.focus(), 100);
   }, [userId]);
 
@@ -46,12 +46,10 @@ export default function SearchPage({ userId, onBack, onSelectChat }: SearchPageP
     const q = searchQuery.toLowerCase();
     const matched: SearchResult[] = [];
 
-    // Search through conversation titles first (fast)
     const titleMatches = conversations.filter((c) =>
       c.title.toLowerCase().includes(q)
     );
 
-    // For title matches, use the title as snippet
     for (const c of titleMatches) {
       matched.push({
         conv_id: c.conv_id,
@@ -61,7 +59,6 @@ export default function SearchPage({ userId, onBack, onSelectChat }: SearchPageP
       });
     }
 
-    // Search through conversation content (load on demand)
     for (const c of conversations) {
       if (matched.some((m) => m.conv_id === c.conv_id)) continue;
       try {
@@ -72,11 +69,10 @@ export default function SearchPage({ userId, onBack, onSelectChat }: SearchPageP
           .join(' ')
           .toLowerCase();
         if (allText.includes(q)) {
-          // Extract a snippet around the match
           const idx = allText.indexOf(q);
           const start = Math.max(0, idx - 60);
           const end = Math.min(allText.length, idx + q.length + 60);
-          const snippet = (start > 0 ? '…' : '') + allText.slice(start, end).trim() + (end < allText.length ? '…' : '');
+          const snippet = (start > 0 ? '...' : '') + allText.slice(start, end).trim() + (end < allText.length ? '...' : '');
           matched.push({
             conv_id: c.conv_id,
             title: c.title,
@@ -103,40 +99,37 @@ export default function SearchPage({ userId, onBack, onSelectChat }: SearchPageP
 
   return (
     <div className="max-w-2xl mx-auto px-6 py-10">
-      <button
-        onClick={onBack}
-        className="flex items-center gap-1.5 text-[13px] text-[#71717A] hover:text-[#FAFAFA] transition-colors mb-6"
-      >
+      <Button variant="ghost" size="sm" onClick={onBack} className="gap-1.5 text-[13px] text-muted-foreground hover:text-foreground mb-6 -ml-2">
         <ArrowLeft size={15} />
         <span>{t('settings.backToChat')}</span>
-      </button>
+      </Button>
 
       <h1 className="text-[22px] font-semibold mb-1">{t('search.title')}</h1>
-      <p className="text-[14px] text-[#71717A] mb-6">{t('search.subtitle')}</p>
+      <p className="text-[14px] text-muted-foreground mb-6">{t('search.subtitle')}</p>
 
       {/* Search input */}
       <div className="relative mb-6">
-        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#71717A]" />
-        <input
+        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+        <Input
           ref={inputRef}
           type="text"
           value={query}
           onChange={(e) => handleSearch(e.target.value)}
           placeholder={t('search.placeholder')}
-          className="w-full pl-10 pr-4 py-2.5 rounded-lg bg-[#18181A] border border-[#27272A] text-[14px] text-[#FAFAFA] placeholder-[#52525B] focus:outline-none focus:border-[#3F3F46] transition-colors"
+          className="pl-10 bg-muted text-[14px]"
         />
       </div>
 
       {/* Results */}
       {searching && (
-        <div className="text-center py-8 text-[#71717A] text-[13px]">
-          <div className="inline-block w-4 h-4 border-2 border-[#3F3F46] border-t-[#A1A1AA] rounded-full animate-spin mr-2" />
-          {lang === 'de' ? 'Suche…' : 'Searching…'}
+        <div className="text-center py-8 text-muted-foreground text-[13px]">
+          <div className="inline-block w-4 h-4 border-2 border-border border-t-muted-foreground rounded-full animate-spin mr-2" />
+          {lang === 'de' ? 'Suche...' : 'Searching...'}
         </div>
       )}
 
       {!searching && hasSearched && results.length === 0 && (
-        <div className="text-center py-12 text-[#71717A]">
+        <div className="text-center py-12 text-muted-foreground">
           <Search size={24} className="mx-auto mb-3 opacity-40" />
           <p className="text-[13px]">{t('search.noResults')}</p>
         </div>
@@ -145,29 +138,33 @@ export default function SearchPage({ userId, onBack, onSelectChat }: SearchPageP
       {!searching && results.length > 0 && (
         <div className="flex flex-col gap-1">
           {results.map((r) => (
-            <button
+            <Button
+              type="button"
+              variant="ghost"
               key={r.conv_id}
               onClick={() => onSelectChat(r.conv_id)}
-              className="w-full text-left p-3 rounded-lg hover:bg-[#18181A] transition-colors group"
+              className="h-auto w-full justify-start p-3 text-left whitespace-normal group"
             >
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-[13px] font-medium text-[#FAFAFA] group-hover:text-white truncate">
-                  {r.title}
-                </span>
-                <span className="text-[11px] text-[#52525B] flex-shrink-0 ml-2">
-                  {formatDate(r.updated_at)}
-                </span>
+              <div className="w-full min-w-0">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[13px] font-medium text-foreground group-hover:text-foreground truncate">
+                    {r.title}
+                  </span>
+                  <span className="text-[11px] text-muted-foreground/60 flex-shrink-0 ml-2">
+                    {formatDate(r.updated_at)}
+                  </span>
+                </div>
+                <p className="text-[12px] text-muted-foreground line-clamp-2 leading-relaxed">
+                  {r.snippet}
+                </p>
               </div>
-              <p className="text-[12px] text-[#71717A] line-clamp-2 leading-relaxed">
-                {r.snippet}
-              </p>
-            </button>
+            </Button>
           ))}
         </div>
       )}
 
       {!searching && !hasSearched && (
-        <div className="text-center py-12 text-[#52525B]">
+        <div className="text-center py-12 text-muted-foreground/60">
           <Search size={24} className="mx-auto mb-3 opacity-30" />
           <p className="text-[12px]">{t('search.hint')}</p>
         </div>

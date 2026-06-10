@@ -4,6 +4,9 @@ import type { LucideIcon } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { parseContent } from '../blocks';
 import { useI18n } from '../i18n';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 // Map campaign type strings to an icon + accent colour so each strategy card
 // gets a visual identifier instead of looking like a label/value table.
@@ -42,23 +45,23 @@ function StrategyCard({ data }: { data: any }) {
   };
 
   return (
-    <div className="mt-3 bg-[#0A0A0A] border border-[#27272A] rounded-xl overflow-hidden">
+    <div className="mt-3 bg-background border border-border rounded-xl overflow-hidden">
       <table className="w-full text-[13px] text-left">
-        <thead className="bg-[#111111] border-b border-[#27272A]">
+        <thead className="bg-card border-b border-border">
           <tr>
-            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider">{t('cards.campaign')}</th>
-            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider w-[110px]">{t('cards.type')}</th>
-            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider w-[150px]">{t('cards.budget')}</th>
-            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider">{t('cards.bidStrategy')}</th>
-            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider w-[120px]">{t('cards.targeting')}</th>
+            <th className="px-4 py-2.5 font-semibold text-muted-foreground uppercase text-[10px] tracking-wider">{t('cards.campaign')}</th>
+            <th className="px-4 py-2.5 font-semibold text-muted-foreground uppercase text-[10px] tracking-wider w-[110px]">{t('cards.type')}</th>
+            <th className="px-4 py-2.5 font-semibold text-muted-foreground uppercase text-[10px] tracking-wider w-[150px]">{t('cards.budget')}</th>
+            <th className="px-4 py-2.5 font-semibold text-muted-foreground uppercase text-[10px] tracking-wider">{t('cards.bidStrategy')}</th>
+            <th className="px-4 py-2.5 font-semibold text-muted-foreground uppercase text-[10px] tracking-wider w-[120px]">{t('cards.targeting')}</th>
           </tr>
         </thead>
         <tbody>
           {campaigns.map((c, i) => {
             const { Icon, accent } = campaignTypeStyle(c.campaign_type || '');
             return (
-              <tr key={i} className="border-t border-[#1F1F1F]">
-                <td className="px-4 py-2.5 text-[#FAFAFA] font-medium">{c.name}</td>
+              <tr key={i} className="border-t border-border/60">
+                <td className="px-4 py-2.5 text-foreground font-medium">{c.name}</td>
                 <td className="px-4 py-2.5">
                   {c.campaign_type ? (
                     <span className="inline-flex items-center gap-1.5 text-[12px]" style={{ color: accent }}>
@@ -66,12 +69,12 @@ function StrategyCard({ data }: { data: any }) {
                       {c.campaign_type}
                     </span>
                   ) : (
-                    <span className="text-[#52525B]">—</span>
+                    <span className="text-muted-foreground/60">—</span>
                   )}
                 </td>
-                <td className="px-4 py-2.5 text-[#D4D4D8]">{fmtBudget(c) || <span className="text-[#52525B]">—</span>}</td>
-                <td className="px-4 py-2.5 text-[#D4D4D8]">{c.bid_strategy || <span className="text-[#52525B]">—</span>}</td>
-                <td className="px-4 py-2.5 text-[#D4D4D8]">{fmtTargeting(c) || <span className="text-[#52525B]">—</span>}</td>
+                <td className="px-4 py-2.5 text-card-foreground/80">{fmtBudget(c) || <span className="text-muted-foreground/60">—</span>}</td>
+                <td className="px-4 py-2.5 text-card-foreground/80">{c.bid_strategy || <span className="text-muted-foreground/60">—</span>}</td>
+                <td className="px-4 py-2.5 text-card-foreground/80">{fmtTargeting(c) || <span className="text-muted-foreground/60">—</span>}</td>
               </tr>
             );
           })}
@@ -85,8 +88,8 @@ function CharRow({ text, limit }: { text: string; limit: number }) {
   const len = text.length;
   const ok = len <= limit;
   return (
-    <div className="flex items-center justify-between gap-3 text-[13px] bg-[#0A0A0A] border border-[#27272A] rounded-lg px-3 py-2">
-      <span className="text-[#D4D4D8] truncate">{text}</span>
+    <div className="flex items-center justify-between gap-3 text-[13px] bg-background border border-border rounded-lg px-3 py-2">
+      <span className="text-card-foreground/80 truncate">{text}</span>
       <span className={`flex-shrink-0 text-[12px] font-semibold ${ok ? 'text-[#34D399]' : 'text-[#F87171]'}`}>
         {len}/{limit}
       </span>
@@ -116,7 +119,7 @@ function AdGroupBlock({ g }: { g: any }) {
 
   return (
     <div>
-      <div className="text-[12px] text-[#71717A] uppercase tracking-wider font-semibold mb-2">{g.name}</div>
+      <div className="text-[12px] text-muted-foreground uppercase tracking-wider font-semibold mb-2">{g.name}</div>
       <div className="p-5 bg-white border border-[#E4E4E7] rounded-xl shadow-sm">
         <div className="text-[#006621] text-[14px] mb-1 font-medium">{t('cards.ad')} · {g.url || 'www.example.com'}</div>
         <div className="text-[#1A0DAB] text-[18px] mb-2 font-medium leading-snug">
@@ -127,13 +130,16 @@ function AdGroupBlock({ g }: { g: any }) {
 
       {(headlines.length > 0 || descriptions.length > 0) && (
         <>
-          <button
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
             onClick={() => setOpen((o) => !o)}
-            className="mt-3 inline-flex items-center gap-1.5 text-[12px] text-[#A1A1AA] hover:text-[#FAFAFA] transition-colors"
+            className="mt-3 h-auto px-0 py-0 text-[12px] text-muted-foreground hover:bg-transparent hover:text-foreground"
           >
             <ChevronRight size={14} className={`transition-transform ${open ? 'rotate-90' : ''}`} />
             {t('cards.charCheck')} · {headlines.length} {t('cards.headlines')}, {descriptions.length} {t('cards.descriptions')}
-          </button>
+          </Button>
 
           {open && (
             <div className="mt-2">
@@ -141,7 +147,7 @@ function AdGroupBlock({ g }: { g: any }) {
                 ? positions.map((pos, pi) =>
                     pos.headlines && pos.headlines.length ? (
                       <div key={pi} className="mt-3">
-                        <div className="text-[11px] text-[#A1A1AA] uppercase tracking-wider font-semibold mb-1.5">
+                        <div className="text-[11px] text-muted-foreground uppercase tracking-wider font-semibold mb-1.5">
                           {t('cards.position')} {pi + 1}
                           {pos.label ? ` · ${pos.label}` : ''}
                         </div>
@@ -153,7 +159,7 @@ function AdGroupBlock({ g }: { g: any }) {
                   )
                 : headlines.length > 0 && (
                     <div className="mt-3">
-                      <div className="text-[11px] text-[#A1A1AA] uppercase tracking-wider font-semibold mb-1.5">{t('cards.headlines')}</div>
+                      <div className="text-[11px] text-muted-foreground uppercase tracking-wider font-semibold mb-1.5">{t('cards.headlines')}</div>
                       <div className="space-y-1.5">
                         {headlines.map((h, j) => <CharRow key={j} text={h} limit={30} />)}
                       </div>
@@ -162,7 +168,7 @@ function AdGroupBlock({ g }: { g: any }) {
 
               {descriptions.length > 0 && (
                 <div className="mt-3">
-                  <div className="text-[11px] text-[#A1A1AA] uppercase tracking-wider font-semibold mb-1.5">{t('cards.descriptions')}</div>
+                  <div className="text-[11px] text-muted-foreground uppercase tracking-wider font-semibold mb-1.5">{t('cards.descriptions')}</div>
                   <div className="space-y-1.5">
                     {descriptions.map((d, j) => <CharRow key={j} text={d} limit={90} />)}
                   </div>
@@ -196,13 +202,13 @@ function AccountPickerCard({ data, onAction }: { data: any; onAction?: (msg: str
   const accounts: any[] = data.accounts || [];
   // data.selected pre-fills the dropdown (used by the scripted demo); real runs
   // start empty.
-  const [sel, setSel] = useState(data.selected || '');
+  const [sel, setSel] = useState(String(data.selected || ''));
   const [done, setDone] = useState(false);
 
   if (accounts.length === 0) return null;
 
   const pick = () => {
-    const acc = accounts.find((a) => a.id === sel);
+    const acc = accounts.find((a) => String(a.id) === sel);
     if (!acc || !onAction) return;
     setDone(true);
     onAction(`${t('chat.targetAccount')}: ${acc.name} · ${acc.id}`);
@@ -210,26 +216,21 @@ function AccountPickerCard({ data, onAction }: { data: any; onAction?: (msg: str
 
   return (
     <div className="mt-3 flex flex-col gap-2 max-w-md">
-      <select
-        value={sel}
-        onChange={(e) => setSel(e.target.value)}
-        disabled={done || !onAction}
-        className="bg-[#0A0A0A] border border-[#27272A] rounded-lg px-3 py-2.5 text-[14px] text-[#FAFAFA] outline-none focus:border-[#3F3F46] disabled:opacity-60"
-      >
-        <option value="">{t('cards.chooseAccount')}</option>
-        {accounts.map((a) => (
-          <option key={a.id} value={a.id}>
-            {a.name} · {a.id}
-          </option>
-        ))}
-      </select>
-      <button
-        onClick={pick}
-        disabled={!sel || done || !onAction}
-        className="self-start text-[14px] font-semibold text-black bg-white rounded-lg px-4 py-2 hover:bg-gray-100 disabled:opacity-40 transition-colors"
-      >
+      <Select value={sel} onValueChange={setSel} disabled={done || !onAction}>
+        <SelectTrigger className="w-full bg-background text-[14px]">
+          <SelectValue placeholder={t('cards.chooseAccount')} />
+        </SelectTrigger>
+        <SelectContent>
+          {accounts.map((a) => (
+            <SelectItem key={a.id} value={String(a.id)}>
+              {a.name} · {a.id}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <Button onClick={pick} disabled={!sel || done || !onAction} className="self-start">
         {t('cards.select')}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -275,28 +276,26 @@ function NameEditorCard({ data, onAction }: { data: any; onAction?: (msg: string
   return (
     <div className="mt-3 flex flex-col gap-3 max-w-md">
       {campaigns.map((c, ci) => (
-        <div key={ci} className="bg-[#0A0A0A] border border-[#27272A] rounded-lg p-3 flex flex-col gap-2.5">
+        <div key={ci} className="bg-background border border-border rounded-lg p-3 flex flex-col gap-2.5">
           <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-[#A1A1AA] uppercase tracking-wider font-semibold">{t('cards.campaignName')}</span>
-            <input
-              type="text"
+            <span className="text-[11px] text-muted-foreground uppercase tracking-wider font-semibold">{t('cards.campaignName')}</span>
+            <Input
               value={c.name}
               onChange={(e) => setCampName(ci, e.target.value)}
               disabled={done || !onAction}
-              className="bg-[#0A0A0A] border border-[#27272A] rounded px-2.5 py-1.5 text-[13.5px] text-[#FAFAFA] outline-none focus:border-[#3F3F46] disabled:opacity-60"
+              className="bg-background text-[13.5px] h-8"
             />
           </label>
           {c.ad_groups.length > 0 && (
-            <div className="ml-3 flex flex-col gap-1.5 border-l-2 border-[#27272A] pl-3">
+            <div className="ml-3 flex flex-col gap-1.5 border-l-2 border-border pl-3">
               {c.ad_groups.map((g, gi) => (
                 <label key={gi} className="flex flex-col gap-1">
-                  <span className="text-[11px] text-[#71717A]">{t('cards.adGroupName')}</span>
-                  <input
-                    type="text"
+                  <span className="text-[11px] text-muted-foreground">{t('cards.adGroupName')}</span>
+                  <Input
                     value={g}
                     onChange={(e) => setAgName(ci, gi, e.target.value)}
                     disabled={done || !onAction}
-                    className="bg-[#0A0A0A] border border-[#27272A] rounded px-2.5 py-1.5 text-[13.5px] text-[#FAFAFA] outline-none focus:border-[#3F3F46] disabled:opacity-60"
+                    className="bg-background text-[13.5px] h-8"
                   />
                 </label>
               ))}
@@ -304,13 +303,9 @@ function NameEditorCard({ data, onAction }: { data: any; onAction?: (msg: string
           )}
         </div>
       ))}
-      <button
-        onClick={submit}
-        disabled={done || !onAction}
-        className="self-start text-[14px] font-semibold text-black bg-white rounded-lg px-4 py-2 hover:bg-gray-100 disabled:opacity-40 transition-colors"
-      >
+      <Button onClick={submit} disabled={done || !onAction} className="self-start">
         {t('cards.nameEditorSubmit')}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -327,20 +322,12 @@ function ConfirmCard({ onAction }: { onAction?: (msg: string) => void }) {
   };
   return (
     <div className="mt-3 flex gap-2">
-      <button
-        onClick={() => answer(t('chat.confirmSetup'))}
-        disabled={done || !onAction}
-        className="text-[14px] font-semibold text-black bg-white rounded-lg px-4 py-2 hover:bg-gray-100 disabled:opacity-40 transition-colors"
-      >
+      <Button onClick={() => answer(t('chat.confirmSetup'))} disabled={done || !onAction}>
         {t('cards.confirm')}
-      </button>
-      <button
-        onClick={() => answer(t('cards.cancel'))}
-        disabled={done || !onAction}
-        className="text-[14px] font-medium text-[#D4D4D8] bg-[#18181A] border border-[#27272A] rounded-lg px-4 py-2 hover:bg-[#27272A] disabled:opacity-40 transition-colors"
-      >
+      </Button>
+      <Button variant="secondary" onClick={() => answer(t('cards.cancel'))} disabled={done || !onAction}>
         {t('cards.cancel')}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -357,7 +344,7 @@ function matchTypeStyle(mt: string): { bg: string; text: string; border: string 
     case 'BROAD':
       return { bg: 'bg-[#2a200a]', text: 'text-[#FBBF24]', border: 'border-[#3f3015]' };
     default:
-      return { bg: 'bg-[#18181A]', text: 'text-[#A1A1AA]', border: 'border-[#27272A]' };
+      return { bg: 'bg-muted', text: 'text-muted-foreground', border: 'border-border' };
   }
 }
 
@@ -420,14 +407,14 @@ function KeywordCard({ data }: { data: any }) {
   if (rows.length === 0) return null;
 
   return (
-    <div className="mt-3 bg-[#0A0A0A] border border-[#27272A] rounded-xl overflow-hidden">
+    <div className="mt-3 bg-background border border-border rounded-xl overflow-hidden">
       <table className="w-full text-[13px] text-left">
-        <thead className="bg-[#111111] border-b border-[#27272A]">
+        <thead className="bg-card border-b border-border">
           <tr>
-            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider">{t('cards.campaign')}</th>
-            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider">{t('cards.keyword')}</th>
-            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider w-[100px]">{t('cards.matchType')}</th>
-            <th className="px-4 py-2.5 font-semibold text-[#A1A1AA] uppercase text-[10px] tracking-wider w-[80px]" title={t('cards.anchorTooltip')}>{t('cards.anchor')}</th>
+            <th className="px-4 py-2.5 font-semibold text-muted-foreground uppercase text-[10px] tracking-wider">{t('cards.campaign')}</th>
+            <th className="px-4 py-2.5 font-semibold text-muted-foreground uppercase text-[10px] tracking-wider">{t('cards.keyword')}</th>
+            <th className="px-4 py-2.5 font-semibold text-muted-foreground uppercase text-[10px] tracking-wider w-[100px]">{t('cards.matchType')}</th>
+            <th className="px-4 py-2.5 font-semibold text-muted-foreground uppercase text-[10px] tracking-wider w-[80px]" title={t('cards.anchorTooltip')}>{t('cards.anchor')}</th>
           </tr>
         </thead>
         <tbody>
@@ -435,18 +422,18 @@ function KeywordCard({ data }: { data: any }) {
             const sameAsPrev = i > 0 && rows[i - 1].campaign === r.campaign;
             const s = matchTypeStyle(r.match_type);
             return (
-              <tr key={i} className="border-t border-[#1F1F1F]">
-                <td className={`px-4 py-2 align-top ${sameAsPrev ? 'text-[#52525B]' : 'text-[#FAFAFA] font-medium'}`}>
+              <tr key={i} className="border-t border-border/60">
+                <td className={`px-4 py-2 align-top ${sameAsPrev ? 'text-muted-foreground/60' : 'text-foreground font-medium'}`}>
                   {sameAsPrev ? '↳' : r.campaign}
                 </td>
-                <td className="px-4 py-2 text-[#D4D4D8]">{r.keyword}</td>
+                <td className="px-4 py-2 text-card-foreground/80">{r.keyword}</td>
                 <td className="px-4 py-2">
                   {r.match_type ? (
                     <span className={`inline-flex items-center text-[11px] font-semibold rounded px-2 py-0.5 border ${s.bg} ${s.text} ${s.border}`}>
                       {r.match_type.toUpperCase()}
                     </span>
                   ) : (
-                    <span className="text-[#52525B]">—</span>
+                    <span className="text-muted-foreground/60">—</span>
                   )}
                 </td>
                 <td className="px-4 py-2">
@@ -459,7 +446,7 @@ function KeywordCard({ data }: { data: any }) {
                       Copy
                     </span>
                   ) : (
-                    <span className="text-[10px] text-[#52525B]" title={t('cards.bidOnlyTooltip')}>{t('cards.bidOnly')}</span>
+                    <span className="text-[10px] text-muted-foreground/60" title={t('cards.bidOnlyTooltip')}>{t('cards.bidOnly')}</span>
                   )}
                 </td>
               </tr>
@@ -469,12 +456,12 @@ function KeywordCard({ data }: { data: any }) {
       </table>
 
       {(adGroupNegatives.length > 0 || campaignNegatives.length > 0) && (
-        <div className="border-t border-[#27272A] p-4 space-y-3">
+        <div className="border-t border-border p-4 space-y-3">
           {adGroupNegatives.map((g, i) => (
             <div key={`ag-${i}`}>
               <div className="flex items-center gap-1.5 mb-1.5">
                 <Ban size={11} className="text-[#F87171]" />
-                <span className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA]">{g.label} — {t('cards.adGroupNegatives')}</span>
+                <span className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">{g.label} — {t('cards.adGroupNegatives')}</span>
               </div>
               <div className="flex flex-wrap gap-1">
                 {g.negs.map((n, j) => (
@@ -487,7 +474,7 @@ function KeywordCard({ data }: { data: any }) {
             <div key={`c-${i}`}>
               <div className="flex items-center gap-1.5 mb-1.5">
                 <Ban size={11} className="text-[#F87171]" />
-                <span className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA]">{g.campaign} — {t('cards.campaignNegatives')}</span>
+                <span className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">{g.campaign} — {t('cards.campaignNegatives')}</span>
               </div>
               <div className="flex flex-wrap gap-1">
                 {g.negs.map((n, j) => (
@@ -517,7 +504,7 @@ function intentStageStyle(stage: string): { bg: string; text: string; border: st
     case 'negative':
       return { bg: 'bg-[#2d1417]', text: 'text-[#F87171]', border: 'border-[#6e2b30]', label: 'Negative' };
     default:
-      return { bg: 'bg-[#18181A]', text: 'text-[#A1A1AA]', border: 'border-[#27272A]', label: '' };
+      return { bg: 'bg-muted', text: 'text-muted-foreground', border: 'border-border', label: '' };
   }
 }
 
@@ -569,10 +556,10 @@ function SearchIntentCard({ data }: { data: any }) {
   const seedKeys = Object.keys(raw);
 
   return (
-    <div className="mt-3 bg-[#0A0A0A] border border-[#27272A] rounded-xl overflow-hidden">
+    <div className="mt-3 bg-background border border-border rounded-xl overflow-hidden">
       {/* Header strip — the "live from Google" claim is part of the value
           proposition; explicit so the user reads it as real data. */}
-      <div className="flex items-center gap-2 px-4 py-2.5 bg-[#111111] border-b border-[#27272A]">
+      <div className="flex items-center gap-2 px-4 py-2.5 bg-card border-b border-border">
         <div className="w-1.5 h-1.5 rounded-full bg-[#2DD4BF] animate-pulse" />
         <span className="text-[11px] uppercase tracking-wider font-semibold text-[#2DD4BF]">{t('cards.realFromGoogle')}</span>
       </div>
@@ -580,28 +567,28 @@ function SearchIntentCard({ data }: { data: any }) {
       {/* Search-bar mocks per seed */}
       <div className="p-4 space-y-4">
         {seedKeys.length === 0 && (
-          <div className="text-[12px] text-[#71717A]">Keine Autocomplete-Daten vorhanden.</div>
+          <div className="text-[12px] text-muted-foreground">Keine Autocomplete-Daten vorhanden.</div>
         )}
         {seedKeys.map((seed) => {
           const suggestions = Array.isArray(raw[seed]) ? raw[seed] : [];
           return (
-            <div key={seed} className="bg-[#111111] border border-[#27272A] rounded-xl overflow-hidden">
-              <div className="flex items-center gap-2.5 px-3 py-2 border-b border-[#27272A]">
-                <Search size={14} className="text-[#A1A1AA] flex-shrink-0" />
-                <span className="text-[13.5px] text-[#FAFAFA] truncate flex-1">{seed}</span>
-                <span className="text-[10px] text-[#71717A]">{suggestions.length} Suggestions</span>
+            <div key={seed} className="bg-card border border-border rounded-xl overflow-hidden">
+              <div className="flex items-center gap-2.5 px-3 py-2 border-b border-border">
+                <Search size={14} className="text-muted-foreground flex-shrink-0" />
+                <span className="text-[13.5px] text-foreground truncate flex-1">{seed}</span>
+                <span className="text-[10px] text-muted-foreground">{suggestions.length} Suggestions</span>
               </div>
               {suggestions.length === 0 ? (
-                <div className="px-3 py-2 text-[11.5px] text-[#71717A]">Keine Suggestions.</div>
+                <div className="px-3 py-2 text-[11.5px] text-muted-foreground">Keine Suggestions.</div>
               ) : (
                 <div className="divide-y divide-[#1F1F1F]">
                   {suggestions.map((sug, i) => {
                     const cls = classifyMap.get(sug.toLowerCase());
                     const s = cls ? intentStageStyle(cls.stage) : intentStageStyle('');
                     return (
-                      <div key={i} className="flex items-center gap-2.5 px-3 py-1.5 hover:bg-[#161616] transition-colors">
-                        <Search size={11} className="text-[#52525B] flex-shrink-0" />
-                        <span className="text-[12.5px] text-[#D4D4D8] flex-1 truncate">{sug}</span>
+                      <div key={i} className="flex items-center gap-2.5 px-3 py-1.5 hover:bg-muted/70 transition-colors">
+                        <Search size={11} className="text-muted-foreground/60 flex-shrink-0" />
+                        <span className="text-[12.5px] text-card-foreground/80 flex-1 truncate">{sug}</span>
                         {cls && (
                           <span className={`text-[10px] font-semibold rounded px-1.5 py-0.5 border ${s.bg} ${s.text} ${s.border}`}>
                             {cls.format || s.label}
@@ -619,8 +606,8 @@ function SearchIntentCard({ data }: { data: any }) {
 
       {/* Demand distribution bar */}
       {total > 0 && (
-        <div className="px-4 py-3 border-t border-[#1F1F1F]">
-          <div className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA] mb-2">{t('cards.demandDistribution')}</div>
+        <div className="px-4 py-3 border-t border-border/60">
+          <div className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground mb-2">{t('cards.demandDistribution')}</div>
           <div className="space-y-1.5">
             {([
               ['awareness', stageCounts.awareness, '#FBBF24'],
@@ -628,11 +615,11 @@ function SearchIntentCard({ data }: { data: any }) {
               ['decision', stageCounts.decision, '#34D399'],
             ] as const).map(([key, count, color]) => (
               <div key={key} className="flex items-center gap-3 text-[12px]">
-                <span className="w-28 text-[#A1A1AA] capitalize">{key}</span>
-                <div className="flex-1 bg-[#27272A] h-1.5 rounded-full overflow-hidden">
+                <span className="w-28 text-muted-foreground capitalize">{key}</span>
+                <div className="flex-1 bg-border h-1.5 rounded-full overflow-hidden">
                   <div className="h-full transition-all" style={{ width: `${pct(count)}%`, backgroundColor: color }} />
                 </div>
-                <span className="w-16 text-right font-mono text-[#D4D4D8]">{pct(count)}% · {count}</span>
+                <span className="w-16 text-right font-mono text-card-foreground/80">{pct(count)}% · {count}</span>
               </div>
             ))}
           </div>
@@ -641,11 +628,11 @@ function SearchIntentCard({ data }: { data: any }) {
 
       {/* Top modifiers */}
       {modifiers.length > 0 && (
-        <div className="px-4 py-3 border-t border-[#1F1F1F]">
-          <div className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA] mb-1.5">{t('cards.topModifiers')}</div>
+        <div className="px-4 py-3 border-t border-border/60">
+          <div className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground mb-1.5">{t('cards.topModifiers')}</div>
           <div className="flex flex-wrap gap-1">
             {modifiers.map((m, i) => (
-              <span key={i} className="text-[11px] text-[#D4D4D8] bg-[#18181A] border border-[#27272A] rounded px-1.5 py-0.5">{m}</span>
+              <span key={i} className="text-[11px] text-card-foreground/80 bg-muted border border-border rounded px-1.5 py-0.5">{m}</span>
             ))}
           </div>
         </div>
@@ -653,16 +640,16 @@ function SearchIntentCard({ data }: { data: any }) {
 
       {/* Negative signals */}
       {negatives.length > 0 && (
-        <div className="px-4 py-3 border-t border-[#1F1F1F]">
+        <div className="px-4 py-3 border-t border-border/60">
           <div className="flex items-center gap-1.5 mb-1.5">
             <Ban size={11} className="text-[#F87171]" />
-            <span className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA]">{t('cards.negativeSignals')}</span>
+            <span className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">{t('cards.negativeSignals')}</span>
           </div>
           <div className="space-y-1">
             {negatives.map((n, i) => (
               <div key={i} className="flex items-start gap-2 text-[11.5px]">
                 <span className="text-[#FCA5A5] bg-[#2d1417] border border-[#6e2b30]/40 rounded px-1.5 py-0.5 font-mono whitespace-nowrap flex-shrink-0">{n.query}</span>
-                {n.reason && <span className="text-[#71717A] leading-snug">{n.reason}</span>}
+                {n.reason && <span className="text-muted-foreground leading-snug">{n.reason}</span>}
               </div>
             ))}
           </div>
@@ -671,8 +658,8 @@ function SearchIntentCard({ data }: { data: any }) {
 
       {/* Ad-group mapping */}
       {mapping.length > 0 && (
-        <div className="px-4 py-3 border-t border-[#1F1F1F]">
-          <div className="text-[10px] uppercase tracking-wider font-semibold text-[#A1A1AA] mb-1.5">{t('cards.adGroupMapping')}</div>
+        <div className="px-4 py-3 border-t border-border/60">
+          <div className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground mb-1.5">{t('cards.adGroupMapping')}</div>
           <div className="space-y-1.5">
             {mapping.map((m, i) => {
               const s = intentStageStyle((m.query_stage || '').toLowerCase());
@@ -683,9 +670,9 @@ function SearchIntentCard({ data }: { data: any }) {
                       {m.query_stage}
                     </span>
                   )}
-                  <ArrowRight size={11} className="text-[#52525B] mt-1 flex-shrink-0" />
-                  <span className="text-[#FAFAFA] font-medium whitespace-nowrap flex-shrink-0">{m.target_ad_group}</span>
-                  {m.rationale && <span className="text-[#71717A] leading-snug">— {m.rationale}</span>}
+                  <ArrowRight size={11} className="text-muted-foreground/60 mt-1 flex-shrink-0" />
+                  <span className="text-foreground font-medium whitespace-nowrap flex-shrink-0">{m.target_ad_group}</span>
+                  {m.rationale && <span className="text-muted-foreground leading-snug">— {m.rationale}</span>}
                 </div>
               );
             })}

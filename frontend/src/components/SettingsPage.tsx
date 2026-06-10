@@ -12,6 +12,11 @@ import {
   type GoogleAdsTestResult,
   type IntegrationsStatus,
 } from '../api';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
+import { Card } from '@/components/ui/card';
+import { Separator } from '@/components/ui/separator';
 
 type Status = 'unconfigured' | 'testing' | 'connected' | 'error';
 
@@ -28,26 +33,26 @@ function StatusBadge({ status }: { status: Status }) {
   const { t } = useI18n();
   if (status === 'testing')
     return (
-      <span className="inline-flex items-center gap-1.5 text-[12px] text-[#A1A1AA]">
+      <Badge variant="outline" className="gap-1.5 text-[12px] text-muted-foreground border-border font-normal">
         <Loader2 size={12} className="animate-spin" /> {t('settings.testing')}
-      </span>
+      </Badge>
     );
   if (status === 'connected')
     return (
-      <span className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[#4ADE80]">
+      <Badge variant="outline" className="gap-1.5 text-[12px] font-medium text-[#4ADE80] border-[#0d4a2f] bg-[#052e16]">
         <span className="w-2 h-2 rounded-full bg-[#4ADE80]" /> {t('settings.connected')}
-      </span>
+      </Badge>
     );
   if (status === 'error')
     return (
-      <span className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[#F87171]">
+      <Badge variant="outline" className="gap-1.5 text-[12px] font-medium text-[#F87171] border-[#6e2b30] bg-[#2d1417]">
         <span className="w-2 h-2 rounded-full bg-[#F87171]" /> {t('settings.failed')}
-      </span>
+      </Badge>
     );
   return (
-    <span className="inline-flex items-center gap-1.5 text-[12px] text-[#71717A]">
-      <span className="w-2 h-2 rounded-full bg-[#52525B]" /> {t('settings.statusUnconfigured')}
-    </span>
+    <Badge variant="outline" className="gap-1.5 text-[12px] text-muted-foreground border-border font-normal">
+      <span className="w-2 h-2 rounded-full bg-muted-foreground/50" /> {t('settings.statusUnconfigured')}
+    </Badge>
   );
 }
 
@@ -73,12 +78,14 @@ function Section({
   const [open, setOpen] = React.useState(defaultOpen ?? false);
   const hasBody = !!children;
   return (
-    <div className="relative border border-[#27272A] rounded-xl bg-[#111111] overflow-hidden">
+    <Card className="relative overflow-hidden">
       {accent && <div className="absolute top-0 bottom-0 left-0 w-[3px]" style={{ backgroundColor: accent }} />}
-      <button
+      <Button
+        type="button"
+        variant="ghost"
         onClick={() => hasBody && setOpen((o) => !o)}
         disabled={!hasBody}
-        className={`w-full flex items-center gap-3 px-4 py-4 text-left ${hasBody ? 'hover:bg-[#161616] transition-colors cursor-pointer' : 'cursor-default'}`}
+        className={`h-auto w-full justify-start gap-3 rounded-none px-4 py-4 text-left ${hasBody ? 'hover:bg-muted/30 cursor-pointer' : 'cursor-default hover:bg-transparent'}`}
       >
         {icon && (
           <div
@@ -89,20 +96,20 @@ function Section({
           </div>
         )}
         <div className="min-w-0 flex-1">
-          <div className="text-[14.5px] font-semibold text-[#FAFAFA]">{title}</div>
-          {subtitle && <div className="text-[12px] text-[#A1A1AA] truncate mt-0.5">{subtitle}</div>}
+          <div className="text-[14.5px] font-semibold text-foreground">{title}</div>
+          {subtitle && <div className="text-[12px] text-muted-foreground truncate mt-0.5">{subtitle}</div>}
         </div>
         <div className="flex-shrink-0 flex items-center gap-3">
           {status}
           {hasBody && (
-            <ChevronRight size={16} className={`text-[#52525B] transition-transform ${open ? 'rotate-90' : ''}`} />
+            <ChevronRight size={16} className={`text-muted-foreground/60 transition-transform ${open ? 'rotate-90' : ''}`} />
           )}
         </div>
-      </button>
+      </Button>
       {open && hasBody && (
-        <div className="px-4 pb-4 pt-3 border-t border-[#1F1F1F]">{children}</div>
+        <div className="px-4 pb-4 pt-3 border-t border-border">{children}</div>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -227,14 +234,14 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     opts: { secret?: boolean; secretSet?: boolean } = {},
   ) => (
     <label className="flex flex-col gap-1.5">
-      <span className="text-[12px] font-medium text-[#A1A1AA]">{t(labelKey)}</span>
-      <input
+      <span className="text-[12px] font-medium text-muted-foreground">{t(labelKey)}</span>
+      <Input
         type={opts.secret ? 'password' : 'text'}
         value={form[key]}
         onChange={set(key)}
         autoComplete="off"
         placeholder={opts.secret && opts.secretSet ? t('settings.secretSet') : ''}
-        className="bg-[#0A0A0A] border border-[#27272A] rounded-lg px-3 py-2.5 text-[14px] text-[#FAFAFA] outline-none focus:border-[#3F3F46] placeholder-[#52525B]"
+        className="bg-background text-[14px]"
       />
     </label>
   );
@@ -247,15 +254,15 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   return (
     <div className="min-h-full">
       <div className="max-w-2xl mx-auto px-6 py-8">
-        <button onClick={onBack} className="inline-flex items-center gap-2 text-[13px] text-[#A1A1AA] hover:text-[#FAFAFA] transition-colors mb-6">
+        <Button variant="ghost" size="sm" onClick={onBack} className="gap-2 text-[13px] text-muted-foreground hover:text-foreground mb-6 -ml-2">
           <ArrowLeft size={15} /> {t('settings.backToChat')}
-        </button>
-        <h1 className="text-[22px] font-semibold text-[#FAFAFA] mb-1">{t('settings.pageTitle')}</h1>
-        <p className="text-[13px] text-[#71717A] mb-6">{t('settings.settingsSubtitle')}</p>
+        </Button>
+        <h1 className="text-[22px] font-semibold text-foreground mb-1">{t('settings.pageTitle')}</h1>
+        <p className="text-[13px] text-muted-foreground mb-6">{t('settings.settingsSubtitle')}</p>
 
         <div className="flex flex-col gap-3">
 
-          {/* ── 1. Google Ads — credentials only ── */}
+          {/* 1. Google Ads — credentials only */}
           <Section
             title={t('settings.googleAds')}
             subtitle={adsSubtitle}
@@ -269,7 +276,6 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
               {field('login_customer_id', 'settings.loginCustomerId')}
               {field('customer_id', 'settings.customerId')}
 
-              {/* Test result */}
               {adsResult && (
                 <div
                   className={`flex items-start gap-2.5 rounded-lg px-3.5 py-3 text-[13px] border ${
@@ -284,7 +290,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
                           {t('settings.connected')} · {adsResult.count ?? adsResult.accounts?.length ?? 0} {t('settings.accountsFound')}
                         </div>
                         {adsResult.accounts && adsResult.accounts.length > 0 && (
-                          <div className="mt-1 text-[12px] text-[#A1A1AA] space-y-0.5">
+                          <div className="mt-1 text-[12px] text-muted-foreground space-y-0.5">
                             {adsResult.accounts.slice(0, 8).map((a) => (
                               <div key={a.id} className="truncate">
                                 {a.name} · {a.id}
@@ -303,29 +309,20 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
                 </div>
               )}
 
-              {/* Save + Test buttons */}
               <div className="flex items-center justify-end gap-2">
-                <button
-                  onClick={save}
-                  disabled={saving}
-                  className="flex items-center gap-2 text-[13px] font-medium text-[#D4D4D8] bg-[#18181A] border border-[#27272A] rounded-lg px-4 py-2 hover:bg-[#27272A] disabled:opacity-50 transition-colors"
-                >
-                  {saving && <Loader2 size={14} className="animate-spin" />}
+                <Button variant="secondary" size="sm" onClick={save} disabled={saving} className="text-[13px]">
+                  {saving && <Loader2 size={14} className="animate-spin mr-1.5" />}
                   {savedTick && !saving ? t('settings.saved') : t('settings.save')}
-                </button>
-                <button
-                  onClick={runAdsTest}
-                  disabled={adsStatus === 'testing'}
-                  className="flex items-center gap-2 text-[13px] font-semibold text-black bg-white rounded-lg px-4 py-2 hover:bg-gray-100 disabled:opacity-50 transition-colors"
-                >
-                  {adsStatus === 'testing' && <Loader2 size={14} className="animate-spin" />}
+                </Button>
+                <Button size="sm" onClick={runAdsTest} disabled={adsStatus === 'testing'} className="text-[13px]">
+                  {adsStatus === 'testing' && <Loader2 size={14} className="animate-spin mr-1.5" />}
                   {adsStatus === 'testing' ? t('settings.testing') : t('settings.test')}
-                </button>
+                </Button>
               </div>
             </div>
           </Section>
 
-          {/* ── 2. Google Auth — OAuth connect/disconnect ── */}
+          {/* 2. Google Auth — OAuth connect/disconnect */}
           <Section
             title={t('settings.googleAuth')}
             subtitle={googleConnected ? t('settings.googleAuthConnectedDesc') : t('settings.googleAuthDesc')}
@@ -341,64 +338,56 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
 
               {!googleConnected ? (
                 <>
-                  <div className="rounded-lg border border-[#27272A] bg-[#0A0A0A] p-3.5 flex flex-col gap-2.5">
-                    <p className="text-[12px] text-[#A1A1AA] leading-relaxed">{t('settings.connectIntro')}</p>
-                    <button
-                      onClick={connect}
-                      className="self-start flex items-center gap-2 text-[13px] font-semibold text-black bg-white rounded-lg px-4 py-2 hover:bg-gray-100 transition-colors"
-                    >
+                  <div className="rounded-lg border border-border bg-background p-3.5 flex flex-col gap-2.5">
+                    <p className="text-[12px] text-muted-foreground leading-relaxed">{t('settings.connectIntro')}</p>
+                    <Button size="sm" onClick={connect} className="self-start text-[13px]">
                       {t('settings.connect')}
-                    </button>
-                    <p className="text-[11px] text-[#71717A] leading-relaxed">
+                    </Button>
+                    <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
                       {t('settings.redirectHint')}
                       <br />
-                      <code className="text-[#A1A1AA] break-all">{redirectUri}</code>
+                      <code className="text-muted-foreground break-all">{redirectUri}</code>
                     </p>
                   </div>
                 </>
               ) : (
                 <>
-                  {/* Connected state with status chips */}
                   <div className="flex flex-col gap-2">
                     <div className="flex items-center gap-2 text-[12.5px]">
                       <CheckCircle2 size={14} className="text-[#4ADE80]" />
-                      <span className="text-[#D4D4D8]">Google Ads API</span>
+                      <span className="text-foreground/80">Google Ads API</span>
                     </div>
                     <div className="flex items-center gap-2 text-[12.5px]">
                       <CheckCircle2 size={14} className="text-[#4ADE80]" />
-                      <span className="text-[#D4D4D8]">{t('settings.sheetsEnabled')}</span>
+                      <span className="text-foreground/80">{t('settings.sheetsEnabled')}</span>
                     </div>
                   </div>
 
-                  {/* Disconnect button */}
-                  <button
+                  <Button
+                    variant="outline"
+                    size="sm"
                     onClick={disconnect}
                     disabled={disconnecting}
-                    className="self-start inline-flex items-center gap-2 text-[12.5px] font-medium text-[#F87171] hover:text-[#FCA5A5] hover:bg-[#2d1417] border border-[#6e2b30]/40 hover:border-[#6e2b30] rounded-lg px-3 py-1.5 disabled:opacity-50 transition-colors"
+                    className="self-start text-[12.5px] text-destructive hover:text-destructive border-destructive/30 hover:border-destructive/60 hover:bg-destructive/10"
                   >
-                    {disconnecting ? <Loader2 size={13} className="animate-spin" /> : <LogOut size={13} />}
+                    {disconnecting ? <Loader2 size={13} className="animate-spin mr-1.5" /> : <LogOut size={13} className="mr-1.5" />}
                     {disconnecting ? t('settings.disconnecting') : t('settings.disconnect')}
-                  </button>
+                  </Button>
                 </>
               )}
 
-              <p className="text-[11px] text-[#71717A] leading-relaxed">{t('settings.securityNote')}</p>
+              <p className="text-[11px] text-muted-foreground/70 leading-relaxed">{t('settings.securityNote')}</p>
 
-              {/* Save button for auth credentials */}
               <div className="flex items-center justify-end gap-2">
-                <button
-                  onClick={save}
-                  disabled={saving}
-                  className="flex items-center gap-2 text-[13px] font-medium text-[#D4D4D8] bg-[#18181A] border border-[#27272A] rounded-lg px-4 py-2 hover:bg-[#27272A] disabled:opacity-50 transition-colors"
-                >
-                  {saving && <Loader2 size={14} className="animate-spin" />}
+                <Button variant="secondary" size="sm" onClick={save} disabled={saving} className="text-[13px]">
+                  {saving && <Loader2 size={14} className="animate-spin mr-1.5" />}
                   {savedTick && !saving ? t('settings.saved') : t('settings.save')}
-                </button>
+                </Button>
               </div>
             </div>
           </Section>
 
-          {/* ── 3. MongoDB MCP — status only ── */}
+          {/* 3. MongoDB MCP — status only */}
           <Section
             title={t('settings.mongoDb')}
             subtitle={mongoSubtitle}
@@ -407,7 +396,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
             accent="#00684A"
             iconBg="#072a1f"
           >
-            <p className="text-[12px] text-[#A1A1AA] leading-relaxed" dangerouslySetInnerHTML={{ __html: t('settings.mongoDbNote') }} />
+            <p className="text-[12px] text-muted-foreground leading-relaxed" dangerouslySetInnerHTML={{ __html: t('settings.mongoDbNote') }} />
           </Section>
 
         </div>

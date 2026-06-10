@@ -1,5 +1,8 @@
 import { ArrowLeft, Zap, Clock, BarChart3, Bell } from 'lucide-react';
 import { useI18n } from '../i18n';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Card, CardContent } from '@/components/ui/card';
 
 interface AutomationsPageProps {
   onBack: () => void;
@@ -33,46 +36,50 @@ export default function AutomationsPage({ onBack }: AutomationsPageProps) {
   ];
 
   return (
-    <div className="max-w-2xl mx-auto px-6 py-10">
-      <button
+    <div className="max-w-3xl mx-auto px-6 py-8 lg:py-10">
+      <Button
+        variant="ghost"
+        size="sm"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-[13px] text-[#71717A] hover:text-[#FAFAFA] transition-colors mb-6"
+        className="gap-1.5 text-[13px] text-muted-foreground hover:text-foreground mb-6 -ml-2"
       >
         <ArrowLeft size={15} />
         <span>{t('settings.backToChat')}</span>
-      </button>
+      </Button>
 
-      <h1 className="text-[22px] font-semibold mb-1">{t('automations.title')}</h1>
-      <p className="text-[14px] text-[#71717A] mb-8">{t('automations.subtitle')}</p>
-
-      {/* Coming soon badge */}
-      <div className="rounded-xl border border-[#27272A] bg-[#111113] p-8 text-center mb-8">
-        <div className="w-12 h-12 rounded-full bg-[#18181A] border border-[#27272A] flex items-center justify-center mx-auto mb-4">
-          <Zap size={22} className="text-[#F59E0B]" />
-        </div>
-        <span className="inline-block px-3 py-1 rounded-full bg-[#F59E0B]/10 text-[#F59E0B] text-[11px] font-semibold uppercase tracking-wider mb-3">
-          {t('automations.comingSoon')}
-        </span>
-        <p className="text-[13px] text-[#A1A1AA] leading-relaxed max-w-md mx-auto">
-          {t('automations.comingSoonDesc')}
-        </p>
+      <div className="mb-7">
+        <h1 className="text-[24px] font-semibold tracking-tight mb-2 text-foreground">{t('automations.title')}</h1>
+        <p className="text-[14px] text-muted-foreground leading-relaxed max-w-xl">{t('automations.subtitle')}</p>
       </div>
 
-      {/* Feature preview cards */}
-      <div className="flex flex-col gap-3">
-        {features.map(({ Icon, title, desc }) => (
-          <div
-            key={title}
-            className="flex items-start gap-4 p-4 rounded-xl border border-[#1F1F1F] bg-[#0D0D0F] opacity-60"
-          >
-            <div className="w-9 h-9 rounded-lg bg-[#18181A] border border-[#27272A] flex items-center justify-center flex-shrink-0 mt-0.5">
-              <Icon size={17} className="text-[#71717A]" />
-            </div>
-            <div>
-              <h3 className="text-[13px] font-medium text-[#FAFAFA] mb-0.5">{title}</h3>
-              <p className="text-[12px] text-[#71717A] leading-relaxed">{desc}</p>
-            </div>
+      <Card className="mb-6 border-dashed bg-card/80">
+        <CardContent className="flex flex-col items-center text-center px-8 py-7">
+          <div className="w-10 h-10 rounded-full bg-[#F59E0B]/10 border border-[#F59E0B]/25 flex items-center justify-center mb-3">
+            <Zap size={19} className="text-[#F59E0B]" />
           </div>
+          <Badge
+            variant="outline"
+            className="mb-3 bg-[#F59E0B]/10 text-[#F59E0B] border-[#F59E0B]/30 text-[11px] font-semibold uppercase tracking-wider"
+          >
+            {t('automations.comingSoon')}
+          </Badge>
+          <p className="text-[13.5px] text-muted-foreground leading-relaxed max-w-md">
+            {t('automations.comingSoonDesc')}
+          </p>
+        </CardContent>
+      </Card>
+
+      <div className="grid gap-3 md:grid-cols-3">
+        {features.map(({ Icon, title, desc }) => (
+          <Card key={title} className="bg-card/60">
+            <CardContent className="p-4">
+              <div className="w-9 h-9 rounded-lg bg-muted border border-border flex items-center justify-center mb-3">
+                <Icon size={17} className="text-muted-foreground" />
+              </div>
+              <h3 className="text-[13px] font-medium text-foreground mb-1">{title}</h3>
+              <p className="text-[12px] text-muted-foreground leading-relaxed">{desc}</p>
+            </CardContent>
+          </Card>
         ))}
       </div>
     </div>

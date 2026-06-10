@@ -31,6 +31,7 @@ const DICT = {
   'sidebar.newChat': { en: 'New chat', de: 'Neuer Chat' },
   'sidebar.search': { en: 'Search', de: 'Suche' },
   'sidebar.searchPlaceholder': { en: 'Search conversations…', de: 'Konversationen durchsuchen…' },
+  'sidebar.agents': { en: 'Agents', de: 'Agenten' },
   'sidebar.automations': { en: 'Automations', de: 'Automatisierungen' },
   'sidebar.recentChats': { en: 'Recent chats', de: 'Letzte Chats' },
   'sidebar.emptyTitle': { en: 'No conversations yet.', de: 'Noch keine Unterhaltungen.' },

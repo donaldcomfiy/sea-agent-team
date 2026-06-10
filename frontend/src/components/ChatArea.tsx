@@ -9,6 +9,12 @@ import type { Msg } from '../messageTypes';
 import { buildDemo, DEMO_DOWNLOAD } from '../demo';
 import { useAuth } from '../auth';
 import { useI18n, agentLanguageDirective, type Lang } from '../i18n';
+import { Button } from '@/components/ui/button';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 
 let _seq = 0;
 const uid = () => `m${++_seq}-${Math.random().toString(36).slice(2, 7)}`;
@@ -44,6 +50,57 @@ const MENTION_AGENTS: { key: string; handle: string }[] = [
   { key: 'excel_exporter_agent', handle: 'Output' },
   { key: 'campaign_builder_agent', handle: 'CampaignBuilder' },
 ];
+
+// Hero-Stack shown in the empty chat state. Order = the visual chain a request
+// typically flows through, ending with Campaign Builder pushing it live.
+const EMPTY_HERO_AGENT_KEYS: string[] = [
+  'sea_team_lead',
+  'landing_page_agent',
+  'strategy_agent',
+  'search_intent_agent',
+  'keyword_agent',
+  'copywriter_agent',
+  'campaign_builder_agent',
+];
+
+function AgentAvatarRow() {
+  const { lang } = useI18n();
+  return (
+    <div className="flex items-center justify-center -space-x-2.5">
+      {EMPTY_HERO_AGENT_KEYS.map((key) => {
+        const meta = agentMeta(key);
+        const Icon = meta.Icon;
+        const isLead = key === 'sea_team_lead';
+        return (
+          <Tooltip key={key}>
+            <TooltipTrigger asChild>
+              <div
+                className={`w-12 h-12 rounded-full flex items-center justify-center transition-transform hover:scale-110 hover:z-10 cursor-default ${
+                  isLead
+                    ? 'bg-transparent'
+                    : `border ring-4 ring-background ${meta.colorClass}`
+                }`}
+              >
+                {meta.avatarUrl ? (
+                  <img
+                    src={meta.avatarUrl}
+                    alt={meta.name[lang]}
+                    className={`w-full h-full rounded-full object-cover ${isLead ? '' : ''}`}
+                  />
+                ) : (
+                  <Icon size={20} strokeWidth={2.2} />
+                )}
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-[11px]">
+              {meta.name[lang]}
+            </TooltipContent>
+          </Tooltip>
+        );
+      })}
+    </div>
+  );
+}
 
 // Slash commands that expand into a full prompt for the team lead. Each entry
 // has a typed handle (lowercase), a short description label key, an icon and
@@ -252,9 +309,9 @@ function AgentBubble({ author, time, streaming, text, onAction, variant = 'all' 
       <div className="flex flex-col gap-1 w-full max-w-[800px]">
         <div className="flex items-center gap-2 mb-1 px-1">
           <span className={`font-semibold text-[13px] ${meta.nameColorClass}`}>{meta.name[lang]}</span>
-          <span className="text-[11px] text-[#71717A]">{time}</span>
+          <span className="text-[11px] text-muted-foreground">{time}</span>
         </div>
-        <div className="bg-[#111111] border border-[#27272A] rounded-2xl p-6 text-[14.5px] text-[#D4D4D8] shadow-sm leading-relaxed relative group">
+        <div className="bg-card border border-border rounded-2xl p-6 text-[14.5px] text-card-foreground/80 shadow-sm leading-relaxed relative group">
           <MessageContent text={text} onAction={onAction} show={variant} />
           {streaming && (
             <span className="inline-block w-[7px] h-[15px] ml-0.5 align-text-bottom bg-[#A78BFA] animate-pulse rounded-[1px]" />
@@ -262,22 +319,28 @@ function AgentBubble({ author, time, streaming, text, onAction, variant = 'all' 
 
           {/* Action buttons (Copy and Export to Sheets) — not on the visual-only bubble */}
           {variant !== 'visual' && (
-          <div className="flex gap-2 mt-4 pt-3 border-t border-[#27272A] opacity-80 group-hover:opacity-100 transition-opacity">
-            <button
+          <div className="flex gap-2 mt-4 pt-3 border-t border-border opacity-80 group-hover:opacity-100 transition-opacity">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
               onClick={handleCopy}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#27272A] bg-[#18181A] hover:bg-[#27272A] hover:text-[#FAFAFA] text-[12px] text-[#A1A1AA] transition-colors"
+              className="text-[12px] text-muted-foreground"
             >
               {copied ? <Check size={13} className="text-[#34D399]" /> : <Copy size={13} />}
               <span>{copied ? t('chat.copied') : t('chat.copy')}</span>
-            </button>
-            <button
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
               onClick={handleExport}
               disabled={exporting || streaming}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#27272A] bg-[#18181A] hover:bg-[#27272A] hover:text-[#FAFAFA] text-[12px] text-[#A1A1AA] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="text-[12px] text-muted-foreground"
             >
               <FileSpreadsheet size={13} />
               <span>{exporting ? t('chat.exporting') : t('chat.exportSheets')}</span>
-            </button>
+            </Button>
           </div>
           )}
         </div>
@@ -306,10 +369,10 @@ function HandoffMessage({ target, time }: { target: string; time: string }) {
       <div className="flex flex-col gap-1">
         <div className="flex items-center gap-2 mb-1 px-1">
           <span className={`font-semibold text-[13px] ${lead.nameColorClass}`}>{lead.name[lang]}</span>
-          <span className="text-[11px] text-[#71717A]">{time}</span>
+          <span className="text-[11px] text-muted-foreground">{time}</span>
         </div>
-        <div className="inline-flex items-center gap-2 bg-[#111111] border border-[#27272A] rounded-full px-4 py-2 text-[13px] text-[#A1A1AA] self-start">
-          <ArrowRight size={14} className="text-[#71717A]" />
+        <div className="inline-flex items-center gap-2 bg-card border border-border rounded-full px-4 py-2 text-[13px] text-muted-foreground self-start">
+          <ArrowRight size={14} className="text-muted-foreground" />
           <span>{t('chat.handoffTo')}</span>
           <span className={`inline-flex items-center gap-1.5 font-medium ${tgt.nameColorClass}`}>
             <TargetIcon size={13} strokeWidth={2.5} />
@@ -334,17 +397,20 @@ function NextStepButton({ currentAuthor, onClick }: { currentAuthor: string; onC
   return (
     <div className="flex gap-4">
       <div className="w-8 flex-shrink-0" />
-      <button
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
         onClick={onClick}
-        className="inline-flex items-center gap-2 text-[13px] text-[#D4D4D8] bg-[#111111] border border-[#27272A] rounded-full px-4 py-2 hover:border-[#3F3F46] hover:text-[#FAFAFA] transition-colors self-start"
+        className="h-auto rounded-full px-4 py-2 text-[13px] text-card-foreground/80 self-start"
       >
         <span>{t('chat.continueWith')}</span>
         <span className={`inline-flex items-center gap-1.5 font-medium ${meta.nameColorClass}`}>
           <NextIcon size={13} strokeWidth={2.5} />
           {meta.name[lang]}
         </span>
-        <ChevronRight size={13} className="text-[#71717A]" />
-      </button>
+        <ChevronRight size={13} className="text-muted-foreground" />
+      </Button>
     </div>
   );
 }
@@ -359,12 +425,12 @@ function ToolMessage({ tool, label, time }: { tool: string; label: string; time:
       <div className="flex flex-col gap-1">
         <div className="flex items-center gap-2 mb-1 px-1">
           <span className="font-semibold text-[13px] text-[#34D399]">MongoDB MCP</span>
-          <span className="text-[11px] text-[#71717A]">{time}</span>
+          <span className="text-[11px] text-muted-foreground">{time}</span>
         </div>
         <div className="inline-flex items-center gap-2 bg-[#072014] border border-[#0d4a2f] rounded-full px-3.5 py-1.5 text-[12.5px] text-[#86EFAC] self-start">
           <span className="font-mono text-[#34D399]">{tool}</span>
-          <span className="text-[#52525B]">·</span>
-          <span className="text-[#A1A1AA]">{label}</span>
+          <span className="text-muted-foreground/60">·</span>
+          <span className="text-muted-foreground">{label}</span>
         </div>
       </div>
     </div>
@@ -394,7 +460,7 @@ function ThinkingIndicator({ author }: { author: string | null }) {
         <div className="flex items-center gap-2 mb-1 px-1">
           <span className={`font-semibold text-[13px] ${meta.nameColorClass}`}>{meta.name[lang]}</span>
         </div>
-        <div className="flex items-center gap-3 bg-[#111111] border border-[#27272A] rounded-2xl px-5 py-4 self-start">
+        <div className="flex items-center gap-3 bg-card border border-border rounded-2xl px-5 py-4 self-start">
           {/* Radar pulse in the agent's accent color */}
           <span className="relative inline-flex w-2 h-2 flex-shrink-0">
             <span
@@ -406,7 +472,7 @@ function ThinkingIndicator({ author }: { author: string | null }) {
               style={{ backgroundColor: accent }}
             />
           </span>
-          <span className="text-[13px] text-[#D4D4D8] animate-soft-pulse">{t('chat.working')}</span>
+          <span className="text-[13px] text-card-foreground/80 animate-soft-pulse">{t('chat.working')}</span>
         </div>
       </div>
     </div>
@@ -792,34 +858,37 @@ export default function ChatArea({
         <div className="max-w-5xl mx-auto px-4 py-6 pb-56 font-sans w-full">
           {isEmpty ? (
             <div className="flex flex-col items-center justify-center mt-[18vh] px-2">
-              <div className="w-16 h-16 bg-[#18181A] border border-[#27272A] rounded-2xl flex items-center justify-center mb-6 shadow-lg">
-                <Users size={32} className="text-[#FAFAFA]" />
+              <div className="mb-6">
+                <AgentAvatarRow />
               </div>
-              <h2 className="text-2xl font-semibold mb-2 text-[#FAFAFA] tracking-tight">{t('chat.emptyTitle')}</h2>
-              <p className="text-[#A1A1AA] text-center max-w-md text-[15px] leading-relaxed mb-8">
+              <h2 className="text-2xl font-semibold mb-2 text-foreground tracking-tight">{t('chat.emptyTitle')}</h2>
+              <p className="text-muted-foreground text-center max-w-md text-[15px] leading-relaxed mb-8">
                 {t('chat.emptySubtitle')}
               </p>
-              <button
+              <Button
+                type="button"
                 onClick={loadDemo}
                 disabled={busy}
-                className="flex items-center justify-center gap-2 w-full max-w-md text-[14px] font-semibold text-black bg-white rounded-xl px-4 py-3 hover:bg-gray-100 disabled:opacity-50 transition-colors mb-4"
+                className="w-full max-w-md h-auto rounded-xl px-4 py-3 text-[14px] font-semibold mb-4"
               >
                 <Play size={16} fill="currentColor" /> {t('chat.playDemo')}
-              </button>
-              <div className="text-[11px] text-[#71717A] mb-4 uppercase tracking-wider">{t('chat.orRealRequest')}</div>
+              </Button>
+              <div className="text-[11px] text-muted-foreground mb-4 uppercase tracking-wider">{t('chat.orRealRequest')}</div>
               <div className="flex flex-col gap-2 w-full max-w-md">
                 {SUGGESTIONS[lang].map((s) => (
-                  <button
+                  <Button
+                    type="button"
+                    variant="outline"
                     key={s}
                     disabled={!sessionId}
                     onClick={() => send(s)}
-                    className="text-left text-[14px] text-[#D4D4D8] bg-[#111111] border border-[#27272A] rounded-xl px-4 py-3 hover:border-[#3F3F46] disabled:opacity-50 transition-colors"
+                    className="h-auto justify-start whitespace-normal rounded-xl px-4 py-3 text-left text-[14px] text-card-foreground/80"
                   >
                     {s}
-                  </button>
+                  </Button>
                 ))}
               </div>
-              {!sessionId && <p className="text-[#71717A] text-[13px] mt-6">{t('chat.connecting')}</p>}
+              {!sessionId && <p className="text-muted-foreground text-[13px] mt-6">{t('chat.connecting')}</p>}
             </div>
           ) : (
             <div className="flex flex-col gap-8 px-2 pb-8">
@@ -830,14 +899,14 @@ export default function ChatArea({
                   return (
                     <div key={m.id} className="flex flex-col items-end gap-1.5 ml-auto">
                       <div className="flex gap-3">
-                        <div className="bg-[#18181A] border border-[#27272A] text-[#FAFAFA] px-4 py-3 rounded-2xl rounded-tr-sm text-[15px] max-w-[500px] shadow-sm leading-relaxed whitespace-pre-wrap">
+                        <div className="bg-muted border border-border text-foreground px-4 py-3 rounded-2xl rounded-tr-sm text-[15px] max-w-[500px] shadow-sm leading-relaxed whitespace-pre-wrap">
                           {highlightTokens(m.text)}
                         </div>
-                        <div className="w-10 h-10 rounded-full overflow-hidden mt-0.5 shadow-sm bg-[#3F3F46] flex-shrink-0">
+                        <div className="w-10 h-10 rounded-full overflow-hidden mt-0.5 shadow-sm bg-ring flex-shrink-0">
                           <img src={userAvatar} alt={userName} referrerPolicy="no-referrer" className="w-full h-full object-cover" />
                         </div>
                       </div>
-                      <div className="flex items-center gap-1 text-[11px] text-[#71717A] mr-11">{m.time}</div>
+                      <div className="flex items-center gap-1 text-[11px] text-muted-foreground mr-11">{m.time}</div>
                     </div>
                   );
                 }
@@ -877,24 +946,23 @@ export default function ChatArea({
 
               {download && (
                 <div className="flex gap-4">
-                  <div className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 border bg-[#111111] border-[#27272A] text-[#A78BFA] shadow-sm">
+                  <div className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 border bg-card border-border text-[#A78BFA] shadow-sm">
                     <FileDown size={18} strokeWidth={2.5} />
                   </div>
                   <div className="flex flex-col sm:flex-row gap-3">
-                    <a
-                      href={exportUrl(download)}
-                      download
-                      className="flex items-center gap-2 px-5 py-3 rounded-lg bg-white text-black font-semibold hover:bg-gray-100 transition-colors text-[14px] shadow-sm self-start"
-                    >
-                      <FileDown size={18} /> {t('chat.downloadExcel')} · {download}
-                    </a>
-                    <button
+                    <Button asChild className="h-auto px-5 py-3 text-[14px] font-semibold shadow-sm self-start">
+                      <a href={exportUrl(download)} download>
+                        <FileDown size={18} /> {t('chat.downloadExcel')} · {download}
+                      </a>
+                    </Button>
+                    <Button
+                      type="button"
                       onClick={handleFileExport}
                       disabled={exportingFile}
-                      className="flex items-center gap-2 px-5 py-3 rounded-lg bg-[#105a30] hover:bg-[#1f6f3f] text-white font-semibold transition-colors text-[14px] shadow-sm self-start disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="h-auto px-5 py-3 bg-[#105a30] hover:bg-[#1f6f3f] text-white text-[14px] font-semibold shadow-sm self-start"
                     >
                       <FileSpreadsheet size={18} /> {exportingFile ? t('chat.exporting') : t('chat.openInSheets')}
-                    </button>
+                    </Button>
                   </div>
                 </div>
               )}
@@ -912,7 +980,7 @@ export default function ChatArea({
       </div>
 
       {/* Input Area */}
-      <div className="absolute bottom-0 left-0 right-0 pointer-events-none bg-gradient-to-t from-[#0A0A0A] via-[#0A0A0A] via-70% to-transparent pt-16 pb-6 w-full">
+      <div className="absolute bottom-0 left-0 right-0 pointer-events-none bg-gradient-to-t from-background via-background via-70% to-transparent pt-16 pb-6 w-full">
         <div className="max-w-5xl mx-auto w-full px-6 pointer-events-auto">
 
           {/* Quick-action chips — shown only when the input is empty and the
@@ -923,61 +991,68 @@ export default function ChatArea({
               {QUICK_ACTIONS.map((qa) => {
                 const QAIcon = qa.Icon;
                 return (
-                  <button
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
                     key={qa.slash}
                     onClick={() => applyQuickAction(qa.slash)}
                     disabled={busy || !sessionId}
-                    className="inline-flex items-center gap-1.5 text-[12.5px] text-[#D4D4D8] bg-[#111111] border border-[#27272A] rounded-full px-3 py-1.5 hover:border-[#3F3F46] hover:text-[#FAFAFA] disabled:opacity-50 transition-colors"
+                    className="h-auto rounded-full px-3 py-1.5 text-[12.5px] text-card-foreground/80"
                   >
                     <QAIcon size={13} strokeWidth={2.3} />
                     {t(qa.labelKey)}
-                  </button>
+                  </Button>
                 );
               })}
             </div>
           )}
 
-          <div className="relative bg-[#111111] border border-[#27272A] rounded-3xl p-1.5 flex flex-col shadow-2xl focus-within:border-[#3F3F46] hover:border-[#3F3F46] transition-colors z-10 w-full min-w-0">
+          <div className="relative bg-card border border-border rounded-3xl p-1.5 flex flex-col shadow-2xl focus-within:border-ring hover:border-ring transition-colors z-10 w-full min-w-0">
             {mentionOpen && mentionMatches.length > 0 && (
-              <div className="absolute bottom-full mb-2 left-2 w-72 max-h-64 overflow-y-auto bg-[#18181A] border border-[#27272A] rounded-xl shadow-2xl z-30 py-1">
+              <div className="absolute bottom-full mb-2 left-2 w-72 max-h-64 overflow-y-auto bg-muted border border-border rounded-xl shadow-2xl z-30 py-1">
                 {mentionMatches.map((a, i) => {
                   const meta = agentMeta(a.key);
                   const Icon = meta.Icon;
                   return (
-                    <button
+                    <Button
+                      type="button"
+                      variant="ghost"
                       key={a.key}
                       onMouseDown={(e) => { e.preventDefault(); selectMention(a.handle); }}
-                      className={`w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors ${i === mentionIndex ? 'bg-[#27272A]' : 'hover:bg-[#1F1F1F]'}`}
+                      className={`h-auto w-full justify-start gap-2.5 px-3 py-2 text-left ${i === mentionIndex ? 'bg-accent' : 'hover:bg-muted'}`}
                     >
                       <span className={`w-5 h-5 rounded-full flex items-center justify-center border flex-shrink-0 ${meta.colorClass}`}>
                         <Icon size={11} strokeWidth={2.5} />
                       </span>
-                      <span className="text-[13px] text-[#FAFAFA]">{meta.name[lang]}</span>
-                      <span className="text-[11px] text-[#71717A] ml-auto">@{a.handle}</span>
-                    </button>
+                      <span className="text-[13px] text-foreground">{meta.name[lang]}</span>
+                      <span className="text-[11px] text-muted-foreground ml-auto">@{a.handle}</span>
+                    </Button>
                   );
                 })}
               </div>
             )}
 
             {slashOpen && slashMatches.length > 0 && (
-              <div className="absolute bottom-full mb-2 left-2 w-80 max-h-64 overflow-y-auto bg-[#18181A] border border-[#27272A] rounded-xl shadow-2xl z-30 py-1">
+              <div className="absolute bottom-full mb-2 left-2 w-80 max-h-64 overflow-y-auto bg-muted border border-border rounded-xl shadow-2xl z-30 py-1">
                 {slashMatches.map((c, i) => {
                   const SIcon = c.Icon;
                   return (
-                    <button
+                    <Button
+                      type="button"
+                      variant="ghost"
                       key={c.handle}
                       onMouseDown={(e) => { e.preventDefault(); selectSlash(c); }}
-                      className={`w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors ${i === slashIndex ? 'bg-[#27272A]' : 'hover:bg-[#1F1F1F]'}`}
+                      className={`h-auto w-full justify-start gap-2.5 px-3 py-2 text-left ${i === slashIndex ? 'bg-accent' : 'hover:bg-muted'}`}
                     >
-                      <span className="w-5 h-5 rounded-full flex items-center justify-center border border-[#27272A] bg-[#111111] text-[#A1A1AA] flex-shrink-0">
+                      <span className="w-5 h-5 rounded-full flex items-center justify-center border border-border bg-card text-muted-foreground flex-shrink-0">
                         <SIcon size={11} strokeWidth={2.5} />
                       </span>
-                      <span className="text-[13px] text-[#FAFAFA] font-mono">
-                        /{c.handle}{c.argsHint ? <span className="text-[#71717A]"> {c.argsHint}</span> : null}
+                      <span className="text-[13px] text-foreground font-mono">
+                        /{c.handle}{c.argsHint ? <span className="text-muted-foreground"> {c.argsHint}</span> : null}
                       </span>
-                      <span className="text-[11px] text-[#71717A] ml-auto truncate">{t(c.descKey)}</span>
-                    </button>
+                      <span className="text-[11px] text-muted-foreground ml-auto truncate">{t(c.descKey)}</span>
+                    </Button>
                   );
                 })}
               </div>
@@ -1039,27 +1114,29 @@ export default function ChatArea({
                 }}
                 placeholder={sessionId ? t('chat.inputPlaceholder') : t('chat.connecting')}
                 disabled={!sessionId}
-                className="relative block w-full min-w-0 resize-none outline-none bg-transparent text-[#FAFAFA] placeholder-[#71717A] text-[15px] leading-6 px-4 py-3.5 min-h-[50px] max-h-[400px] overflow-y-auto disabled:opacity-60"
+                className="relative block w-full min-w-0 resize-none outline-none bg-transparent text-foreground placeholder:text-muted-foreground text-[15px] leading-6 px-4 py-3.5 min-h-[50px] max-h-[400px] overflow-y-auto disabled:opacity-60"
                 style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}
                 rows={1}
               />
             </div>
             <div className="flex justify-end items-center px-2 pb-1.5 pt-1">
-              <button
+              <Button
+                type="button"
+                size="icon"
                 onClick={() => send(input)}
                 disabled={busy || !sessionId || !input.trim()}
-                className="p-2 bg-white text-black hover:bg-gray-200 rounded-full transition-colors w-8 h-8 flex items-center justify-center disabled:opacity-40"
+                className="rounded-full"
                 title={busy ? t('chat.working') : undefined}
               >
                 {busy ? <Loader2 size={18} className="animate-spin" /> : <ArrowUp size={18} strokeWidth={2.5} />}
-              </button>
+              </Button>
             </div>
           </div>
 
-          <div className="text-center mt-3 text-[11px] text-[#71717A] pointer-events-auto">
+          <div className="text-center mt-3 text-[11px] text-muted-foreground pointer-events-auto">
             {t('chat.inputHints')}
           </div>
-          <div className="text-center mt-1 text-[10px] text-[#52525B] pointer-events-auto">
+          <div className="text-center mt-1 text-[10px] text-muted-foreground/60 pointer-events-auto">
             {t('chat.disclaimer')}
           </div>
         </div>
