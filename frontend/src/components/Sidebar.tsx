@@ -237,7 +237,7 @@ export default function Sidebar({ userId, activeConvId, refreshKey, onNewChat, o
       <div className="px-5"><Separator /></div>
 
       {/* Recent chats (live from backend) */}
-      <ScrollArea className="flex-1 px-3 py-2">
+      <ScrollArea className="flex-1 px-3 py-2 overflow-hidden">
         <div className="px-3 pb-3 flex items-center justify-between">
           <span className="text-[13px] font-medium text-foreground">{t('sidebar.recentChats')}</span>
         </div>
@@ -253,7 +253,7 @@ export default function Sidebar({ userId, activeConvId, refreshKey, onNewChat, o
             <span className="text-[12px] leading-relaxed">{t('search.noResults')}</span>
           </div>
         ) : (
-          <div className="flex flex-col gap-0.5">
+          <div className="flex flex-col gap-0.5 overflow-hidden">
             {filteredChats.map((chat) => {
               const active = chat.conv_id === activeConvId;
               return (
